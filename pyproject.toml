@@ -8,6 +8,9 @@ license = { file = "LICENSE.md" }
 requires-python = ">=3.11"
 dependencies = [
     "decart>=0.0.35",
+    # decart's realtime module imports tenacity but doesn't declare it.
+    # Pin here so end users don't hit a ModuleNotFoundError at runtime.
+    "tenacity>=8.2",
     "aiortc>=1.9",
     "av>=11.0",
     "opencv-python>=4.10",
