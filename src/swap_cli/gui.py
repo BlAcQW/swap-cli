@@ -318,21 +318,27 @@ class SwapGUI(ctk.CTk):
         return v.split()[0] if v else "lucy-2"
 
     def _on_live(self) -> None:
+        print("[gui] live clicked", flush=True)
         if self._session_thread is not None and self._session_thread.is_alive():
+            print("[gui] bail: session already live", flush=True)
             self._status_var.set("Already live.")
             return
 
         cfg = config.load()
         if not cfg.is_complete:
+            print("[gui] bail: config incomplete", flush=True)
             self._status_var.set("⚠ Run `swap setup` in a terminal first.")
             return
         if not self._reference_path:
+            print("[gui] bail: no reference face loaded", flush=True)
             self._status_var.set("Pick a reference face first.")
             return
         camera = self._selected_camera()
         if camera is None:
+            print("[gui] bail: no camera selected", flush=True)
             self._status_var.set("No camera selected.")
             return
+        print(f"[gui] starting session: face={self._reference_path}, camera={camera.index}", flush=True)
 
         record_path: Path | None = None
         if self._record_var.get():
