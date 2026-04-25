@@ -12,7 +12,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import customtkinter as ctk
 from PIL import Image
@@ -44,6 +44,9 @@ class SwapGUI(ctk.CTk):
         self._session_thread: threading.Thread | None = None
         self._session_loop: asyncio.AbstractEventLoop | None = None
         self._stop_event: asyncio.Event | None = None
+        # Set by runtime.run_session via the on_runtime_ready callback. Calling
+        # this from the tk main thread cleanly winds the session down.
+        self._stop_session: Callable[[], None] | None = None
         self._status_var = tk.StringVar(value="Idle.")
 
         self._build_ui()
@@ -350,6 +353,9 @@ class SwapGUI(ctk.CTk):
             # Worker thread → tk main thread. Bind msg via default arg.
             self.after(0, lambda m=msg: self._status_var.set(m))
 
+        def _capture_stop(stop_fn: Callable[[], None]) -> None:
+            self._stop_session = stop_fn
+
         opts = RunOptions(
             decart_api_key=cfg.decart_api_key or "",
             reference=str(self._reference_path),
@@ -358,6 +364,7 @@ class SwapGUI(ctk.CTk):
             camera_device=camera.index,
             record=record_path,
             on_status_change=_emit_status,
+            on_runtime_ready=_capture_stop,
         )
 
         self._stop_event = asyncio.Event()
@@ -379,6 +386,7 @@ class SwapGUI(ctk.CTk):
                 print("[gui] worker thread exiting", flush=True)
                 loop.close()
                 self._session_loop = None
+                self._stop_session = None
                 self.after(0, lambda: self._set_running(False))
                 self.after(0, lambda: self._status_var.set("Session ended."))
 
@@ -421,10 +429,20 @@ class SwapGUI(ctk.CTk):
             pass
 
     def _on_stop(self) -> None:
-        # The runtime listens on the user pressing Q in the preview window.
-        # We can't programmatically signal it from here without a deeper hook,
-        # so this is a placeholder until we wire a stop event into runtime.
-        self._status_var.set("Press Q in the preview window to stop the session.")
+        if self._stop_session is None:
+            self._status_var.set("Nothing running.")
+            return
+        print("[gui] stop clicked", flush=True)
+        self._status_var.set("Stopping…")
+        try:
+            self._stop_session()
+        except Exception as err:  # noqa: BLE001
+            self._status_var.set(f"Stop failed: {err}")
+            return
+        # Disable Stop immediately so the user can't double-click; the worker's
+        # `finally` will reset _set_running(False) when the loop fully unwinds.
+        self._stop_btn.configure(state="disabled")
+        self._stop_session = None
 
     def _set_running(self, running: bool) -> None:
         self._live_btn.configure(state="disabled" if running else "normal")

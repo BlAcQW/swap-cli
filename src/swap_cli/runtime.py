@@ -41,6 +41,10 @@ class RunOptions:
     # from the asyncio worker thread; the GUI is responsible for marshalling
     # back to the tk main thread (e.g. via root.after).
     on_status_change: Callable[[str], None] = field(default=_noop_status)
+    # Optional callback that hands the caller a thread-safe stop function once
+    # the session is set up. Calling that function from any thread cleanly
+    # winds down the live session.
+    on_runtime_ready: Callable[[Callable[[], None]], None] | None = None
 
 
 async def run_session(opts: RunOptions) -> None:
@@ -71,6 +75,17 @@ async def run_session(opts: RunOptions) -> None:
     client = DecartClient(api_key=opts.decart_api_key)
     quit_event = asyncio.Event()
     notify = opts.on_status_change
+
+    # Hand the caller a thread-safe stop function. The GUI's Stop button
+    # calls this from the tk main thread; we schedule quit_event.set() on
+    # this asyncio loop via call_soon_threadsafe.
+    if opts.on_runtime_ready is not None:
+        loop = asyncio.get_running_loop()
+
+        def _request_stop() -> None:
+            loop.call_soon_threadsafe(quit_event.set)
+
+        opts.on_runtime_ready(_request_stop)
 
     realtime_client: Any = None
     display: Display | None = None
