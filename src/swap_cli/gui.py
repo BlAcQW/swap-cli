@@ -340,6 +340,10 @@ class SwapGUI(ctk.CTk):
 
             record_path = default_recording_path()
 
+        def _emit_status(msg: str) -> None:
+            # Worker thread → tk main thread. Bind msg via default arg.
+            self.after(0, lambda m=msg: self._status_var.set(m))
+
         opts = RunOptions(
             decart_api_key=cfg.decart_api_key or "",
             reference=str(self._reference_path),
@@ -347,6 +351,7 @@ class SwapGUI(ctk.CTk):
             model_name=self._selected_model(),
             camera_device=camera.index,
             record=record_path,
+            on_status_change=_emit_status,
         )
 
         self._stop_event = asyncio.Event()

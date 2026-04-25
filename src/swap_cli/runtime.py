@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .camera import CameraTrack
 from .display import Display, default_recording_path
+
+CONNECT_TIMEOUT_S = 20.0
+
+
+def _noop_status(_msg: str) -> None:
+    return None
 
 DEFAULT_PROMPT = (
     "Substitute the person in the video with the person in the reference image. "
@@ -31,6 +37,10 @@ class RunOptions:
     model_name: str = DEFAULT_MODEL_NAME
     camera_device: int = 0
     record: Path | None = None
+    # Optional callback for surfacing state to a UI status bar. Always called
+    # from the asyncio worker thread; the GUI is responsible for marshalling
+    # back to the tk main thread (e.g. via root.after).
+    on_status_change: Callable[[str], None] = field(default=_noop_status)
 
 
 async def run_session(opts: RunOptions) -> None:
@@ -54,41 +64,56 @@ async def run_session(opts: RunOptions) -> None:
 
     client = DecartClient(api_key=opts.decart_api_key)
     quit_event = asyncio.Event()
+    notify = opts.on_status_change
 
     realtime_client: Any = None
     display: Display | None = None
     try:
-        realtime_client = await RealtimeClient.connect(
-            base_url=client.base_url,
-            api_key=client.api_key,
-            local_track=camera,
-            options=RealtimeConnectOptions(
-                model=model,
-                on_remote_stream=lambda remote_track: _on_remote_stream(
-                    remote_track,
-                    record=opts.record,
-                    quit_event=quit_event,
-                    display_box=display_box,
+        notify("Negotiating Decart session…")
+        try:
+            realtime_client = await asyncio.wait_for(
+                RealtimeClient.connect(
+                    base_url=client.base_url,
+                    api_key=client.api_key,
+                    local_track=camera,
+                    options=RealtimeConnectOptions(
+                        model=model,
+                        on_remote_stream=lambda remote_track: _on_remote_stream(
+                            remote_track,
+                            record=opts.record,
+                            quit_event=quit_event,
+                            display_box=display_box,
+                        ),
+                        initial_state=ModelState(
+                            prompt=Prompt(text=opts.prompt, enhance=True),
+                        ),
+                    ),
                 ),
-                initial_state=ModelState(
-                    prompt=Prompt(text=opts.prompt, enhance=True),
-                ),
-            ),
-        )
+                timeout=CONNECT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"Decart connection timed out after {CONNECT_TIMEOUT_S:.0f}s. "
+                "Check your API key and that UDP traffic is allowed by your firewall."
+            ) from exc
 
         def _on_connection_change(state: str) -> None:
             print(f"[runtime] connection: {state}")
+            notify(f"Connection: {state}")
             if state == "disconnected":
                 quit_event.set()
 
         def _on_error(error: Any) -> None:
-            print(f"[runtime] error: {getattr(error, 'message', error)}")
+            msg = getattr(error, "message", str(error))
+            print(f"[runtime] error: {msg}")
+            notify(f"Error: {msg}")
             quit_event.set()
 
         def _on_tick(message: Any) -> None:
             seconds = getattr(message, "seconds", 0)
             # carriage return so we update in-place
             print(f"\rstreaming · {seconds}s", end="", flush=True)
+            notify(f"Live · {seconds}s")
 
         realtime_client.on("connection_change", _on_connection_change)
         realtime_client.on("error", _on_error)
@@ -96,10 +121,12 @@ async def run_session(opts: RunOptions) -> None:
 
         # Apply the reference identity (URL or local file path; bytes also OK).
         if opts.reference:
+            notify("Applying reference identity…")
             await realtime_client.set(
                 _build_set_input(opts.prompt, opts.reference),
             )
 
+        notify("Connected · waiting for first frame…")
         await quit_event.wait()
         print()  # newline after the tick line
     finally:

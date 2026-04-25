@@ -64,6 +64,8 @@ class Display:
 
     async def _loop(self) -> None:
         cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW_TITLE, 960, 540)
+        first_frame = True
         try:
             while not self._stopped.is_set():
                 frame = await self._track.recv()
@@ -73,6 +75,14 @@ class Display:
                 if self._writer is not None:
                     self._writer.write(bgr)
                 cv2.imshow(WINDOW_TITLE, bgr)
+                if first_frame:
+                    # Flash topmost so the cv2 window pops above the tk GUI on
+                    # Windows. We don't want it pinned forever — just one beat.
+                    with suppress(Exception):
+                        cv2.setWindowProperty(WINDOW_TITLE, cv2.WND_PROP_TOPMOST, 1)
+                        cv2.waitKey(1)
+                        cv2.setWindowProperty(WINDOW_TITLE, cv2.WND_PROP_TOPMOST, 0)
+                    first_frame = False
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), ord("Q"), 27):  # q or ESC
                     self._on_quit()
