@@ -375,7 +375,8 @@ class SwapGUI(ctk.CTk):
         try:
             await run_session(opts)
         except Exception as err:
-            self.after(0, lambda: self._status_var.set(f"Error: {err}"))
+            msg = str(err) or err.__class__.__name__
+            self.after(0, lambda m=msg: self._status_var.set(f"Error: {m}"))
 
     def _check_license_async(self) -> None:
         try:
