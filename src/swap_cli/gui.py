@@ -365,12 +365,18 @@ class SwapGUI(ctk.CTk):
         self._status_var.set("Connecting…")
 
         def worker() -> None:
+            print("[gui] worker thread started", flush=True)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             self._session_loop = loop
             try:
                 loop.run_until_complete(self._supervised_run(opts))
+            except BaseException as e:
+                import traceback
+                traceback.print_exc()
+                print(f"[gui] worker died: {e}", flush=True)
             finally:
+                print("[gui] worker thread exiting", flush=True)
                 loop.close()
                 self._session_loop = None
                 self.after(0, lambda: self._set_running(False))
@@ -383,11 +389,17 @@ class SwapGUI(ctk.CTk):
         threading.Thread(target=self._check_license_async, daemon=True).start()
 
     async def _supervised_run(self, opts: RunOptions) -> None:
+        print("[gui] _supervised_run entered", flush=True)
         try:
             await run_session(opts)
         except Exception as err:
+            import traceback
+            traceback.print_exc()
             msg = str(err) or err.__class__.__name__
+            print(f"[gui] caught exception: {msg}", flush=True)
             self.after(0, lambda m=msg: self._status_var.set(f"Error: {m}"))
+        else:
+            print("[gui] run_session returned cleanly", flush=True)
 
     def _check_license_async(self) -> None:
         try:

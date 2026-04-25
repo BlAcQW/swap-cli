@@ -45,6 +45,8 @@ class RunOptions:
 
 async def run_session(opts: RunOptions) -> None:
     """Open a realtime Decart session and stream until the user quits."""
+    print("[runtime] entering run_session", flush=True)
+
     # Lazy import — `decart` and `aiortc` pull in heavy native deps and we
     # don't want them loaded for `swap version` / `swap config` / etc.
     from decart import DecartClient, models  # type: ignore[import-not-found]
@@ -54,13 +56,17 @@ async def run_session(opts: RunOptions) -> None:
     )
     from decart.types import ModelState, Prompt  # type: ignore[import-not-found]
 
+    print("[runtime] imports ok", flush=True)
     model = models.realtime(opts.model_name)
+    print(f"[runtime] model={opts.model_name} {model.width}x{model.height}@{model.fps}fps", flush=True)
+
     camera = CameraTrack(
         device=opts.camera_device,
         width=int(model.width),
         height=int(model.height),
         fps=int(model.fps),
     )
+    print(f"[runtime] camera opened on device {opts.camera_device}", flush=True)
 
     client = DecartClient(api_key=opts.decart_api_key)
     quit_event = asyncio.Event()
@@ -69,6 +75,7 @@ async def run_session(opts: RunOptions) -> None:
     realtime_client: Any = None
     display: Display | None = None
     try:
+        print("[runtime] about to call RealtimeClient.connect", flush=True)
         notify("Negotiating Decart session…")
         try:
             realtime_client = await asyncio.wait_for(
