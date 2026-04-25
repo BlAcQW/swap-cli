@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fractions
+import sys
 import time
 from typing import Final
 
@@ -12,6 +13,15 @@ import cv2
 from aiortc import VideoStreamTrack
 
 VIDEO_CLOCK_RATE: Final = 90_000  # standard for video tracks
+
+
+def _platform_backend() -> int:
+    """Pick the most stable cv2 capture backend for the current OS."""
+    if sys.platform == "win32":
+        return cv2.CAP_DSHOW
+    if sys.platform == "darwin":
+        return cv2.CAP_AVFOUNDATION
+    return cv2.CAP_V4L2
 
 
 class CameraTrack(VideoStreamTrack):
@@ -25,7 +35,7 @@ class CameraTrack(VideoStreamTrack):
 
     def __init__(self, *, device: int = 0, width: int, height: int, fps: int) -> None:
         super().__init__()
-        self._cap = cv2.VideoCapture(device)
+        self._cap = cv2.VideoCapture(device, _platform_backend())
         if not self._cap.isOpened():
             raise RuntimeError(f"Could not open camera device {device}")
 
