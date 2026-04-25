@@ -8,6 +8,7 @@ realtime stream in a separate window via the existing display.py.
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -25,6 +26,17 @@ from .version import __version__
 if TYPE_CHECKING:
     pass
 
+if sys.platform == "win32":
+    # Make Tk render correctly on high-DPI Alienware/Surface/4K displays.
+    # Without this, customtkinter's internal scaling fights the OS and the
+    # window can render off-screen or at the wrong size.
+    try:
+        from ctypes import windll
+
+        windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except Exception:  # noqa: BLE001 — best effort on older Windows
+        pass
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -35,8 +47,20 @@ class SwapGUI(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"swap-cli {__version__} · live deepfake")
-        self.geometry("520x720")
+        W, H = 520, 720
         self.minsize(480, 660)
+        # Center on the primary monitor so the window can't open off-screen
+        # on multi-monitor setups (Alienware ships with this misconfigured).
+        self.update_idletasks()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = max(0, (sw - W) // 2)
+        y = max(0, (sh - H) // 2)
+        self.geometry(f"{W}x{H}+{x}+{y}")
+        # Flash topmost so the window pops to the foreground even if another
+        # app stole focus during start-up. Released after 200ms so users can
+        # alt-tab freely afterward.
+        self.after(0, self._raise_to_front)
 
         self._reference_path: Path | None = None
         self._thumb_image: ctk.CTkImage | None = None
@@ -451,8 +475,41 @@ class SwapGUI(ctk.CTk):
         self._camera_dropdown.configure(state="disabled" if running else "readonly")
         self._tier_dropdown.configure(state="disabled" if running else "readonly")
 
+    def _raise_to_front(self) -> None:
+        """Flash the window topmost for one beat so it's visible at startup."""
+        try:
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(200, lambda: self.attributes("-topmost", False))
+            self.focus_force()
+        except Exception:  # noqa: BLE001 — non-fatal cosmetic
+            pass
+
 
 def launch() -> None:
     """Entrypoint used by `swap gui`."""
-    app = SwapGUI()
-    app.mainloop()
+    print("[gui] starting swap-cli GUI", flush=True)
+    try:
+        app = SwapGUI()
+    except Exception:
+        import traceback
+
+        print("[gui] failed to construct window:", flush=True)
+        traceback.print_exc()
+        # Pause so the user can read the trace before the cmd window closes
+        # if they ran via a desktop shortcut instead of a terminal.
+        try:
+            input("\nPress Enter to exit…")
+        except EOFError:
+            pass
+        raise
+    print("[gui] entering mainloop", flush=True)
+    try:
+        app.mainloop()
+    except Exception:
+        import traceback
+
+        print("[gui] mainloop crashed:", flush=True)
+        traceback.print_exc()
+        raise
+    print("[gui] mainloop returned", flush=True)
