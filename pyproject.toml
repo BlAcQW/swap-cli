@@ -22,6 +22,9 @@ dependencies = [
     "pydantic>=2.7",
     "platformdirs>=4.2",
     "customtkinter>=5.2",
+    # Friendly camera names on Windows ("Logitech BRIO" instead of "Camera 1").
+    # Wraps DirectShow's filter list — Windows-only.
+    "pygrabber>=0.2 ; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
