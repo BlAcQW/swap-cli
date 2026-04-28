@@ -26,6 +26,15 @@ app = typer.Typer(
 console = Console()
 err_console = Console(stderr=True)
 
+# Voice cloning subcommand group (Sprint 13). 13a ships the install hook +
+# stubs for list/add/remove; 13b fills in the rest.
+voices_app = typer.Typer(
+    name="voices",
+    help="Manage voice cloning library and dependencies (optional feature).",
+    no_args_is_help=True,
+)
+app.add_typer(voices_app, name="voices")
+
 
 @app.command()
 def version() -> None:
@@ -219,6 +228,110 @@ def run(
     except Exception as err:  # noqa: BLE001
         err_console.print(f"[red]session failed: {err}[/red]")
         raise typer.Exit(1) from err
+
+
+# ── voices ─────────────────────────────────────────────────────────────────
+# Sprint 13a: install hook is real; list/add/remove are stubs that print
+# the planned behavior. 13b implements the rest.
+
+
+@voices_app.command("install")
+def voices_install() -> None:
+    """Install the optional voice extra and download OpenVoice weights.
+
+    Runs `pip install 'swap-cli[voice]'` against the current interpreter to
+    pull torch + sounddevice + librosa (~3 GB). Weight download lands in 13b.
+    """
+    from . import voice_prereq
+
+    pre = voice_prereq.check_all()
+    if not pre.gpu.ok:
+        err_console.print(
+            f"[red]✗ {pre.gpu.label}.[/red] {pre.gpu.hint or ''}\n"
+            "[red]Voice features require a supported GPU.[/red]"
+        )
+        raise typer.Exit(2)
+
+    if pre.deps_installed.ok:
+        console.print(f"[green]✓ voice deps already installed.[/green]")
+    else:
+        console.print(
+            "Installing voice deps via "
+            f"[bold]{sys.executable} -m pip install 'swap-cli[voice]'[/bold] …"
+        )
+        cmd = [sys.executable, "-m", "pip", "install", "swap-cli[voice]"]
+        # Editable installs (`pip install -e .`) need the local path syntax.
+        if (Path.cwd() / "pyproject.toml").exists():
+            cmd = [sys.executable, "-m", "pip", "install", "-e", ".[voice]"]
+        try:
+            import subprocess
+
+            subprocess.check_call(cmd)
+            console.print("[green]✓ voice deps installed[/green]")
+        except subprocess.CalledProcessError as err:
+            err_console.print(f"[red]pip install failed: {err}[/red]")
+            raise typer.Exit(1) from err
+
+    console.print(
+        "\n[yellow]Note:[/yellow] OpenVoice weight download (~5 GB) lands in "
+        "Sprint 13b. Voice cloning is not yet usable."
+    )
+
+
+@voices_app.command("uninstall")
+def voices_uninstall() -> None:
+    """Remove OpenVoice weights from disk (frees ~5 GB)."""
+    from . import voice_prereq
+
+    weights = voice_prereq.openvoice_weights_dir()
+    if not weights.exists():
+        console.print("[dim]No weights present — nothing to remove.[/dim]")
+        return
+    console.print(
+        f"[yellow]Sprint 13b will remove[/yellow] {weights} "
+        f"(~5 GB once weights actually ship)."
+    )
+
+
+@voices_app.command("list")
+def voices_list() -> None:
+    """List the bundled library + any user-added voices."""
+    console.print(
+        "[yellow]Coming in Sprint 13b.[/yellow] Will print the bundled "
+        "library (Aria, Ben, Sage, …) and any voices you added via "
+        "[bold]swap voices add[/bold]."
+    )
+
+
+@voices_app.command("add")
+def voices_add(
+    path: Annotated[Path, typer.Argument(help="Path to a WAV/MP3 reference.")],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Display name. Defaults to file stem."),
+    ] = None,
+) -> None:
+    """Add a custom reference voice from a WAV/MP3."""
+    if not path.exists():
+        err_console.print(f"[red]File not found: {path}[/red]")
+        raise typer.Exit(1)
+    voice_name = name or path.stem
+    console.print(
+        f"[yellow]Coming in Sprint 13b.[/yellow] Will extract an OpenVoice "
+        f"embedding from [bold]{path}[/bold] and save as "
+        f"[bold]{voice_name}[/bold]."
+    )
+
+
+@voices_app.command("remove")
+def voices_remove(
+    name: Annotated[str, typer.Argument(help="Voice name to remove.")],
+) -> None:
+    """Remove a custom voice from your library."""
+    console.print(
+        f"[yellow]Coming in Sprint 13b.[/yellow] Will delete custom voice "
+        f"[bold]{name}[/bold] from ~/.swap/voices/."
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

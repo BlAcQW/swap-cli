@@ -34,6 +34,15 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
 ]
+# Optional voice cloning extra. Only installed when the user explicitly opts
+# in via `swap voices install` from the GUI. PyTorch alone is ~2.5 GB so we
+# never pull this in the base install.
+voice = [
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "sounddevice>=0.4",
+    "librosa>=0.10",
+]
 
 [project.scripts]
 swap = "swap_cli.cli:app"

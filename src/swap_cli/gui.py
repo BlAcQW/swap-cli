@@ -224,6 +224,33 @@ class SwapGUI(ctk.CTk):
             command=self._refresh_cameras,
         ).grid(row=1, column=1)
 
+        # Voice section (Sprint 13a — opt-in, default collapsed). The modal
+        # logic + library dropdown lands in 13b; today this is just the toggle
+        # surface so users see "Voice features coming" and we can verify
+        # placement before plumbing the rest.
+        voice_row = ctk.CTkFrame(outer, fg_color="transparent")
+        voice_row.pack(fill="x", pady=(14, 0))
+        ctk.CTkLabel(
+            voice_row, text="Voice", anchor="w", font=ctk.CTkFont(size=11)
+        ).pack(anchor="w")
+        self._voice_collapsed_row = ctk.CTkFrame(voice_row, fg_color="transparent")
+        self._voice_collapsed_row.pack(fill="x")
+        ctk.CTkLabel(
+            self._voice_collapsed_row,
+            text="☐ Off · clone your voice (requires GPU)",
+            anchor="w",
+            text_color="#6b7280",
+        ).pack(side="left", fill="x", expand=True)
+        self._enable_voice_btn = ctk.CTkButton(
+            self._voice_collapsed_row,
+            text="Enable…",
+            width=86,
+            height=28,
+            corner_radius=6,
+            command=self._on_enable_voice,
+        )
+        self._enable_voice_btn.pack(side="right")
+
         # Action buttons row
         actions = ctk.CTkFrame(outer, fg_color="transparent")
         actions.pack(fill="x", pady=(20, 0))
@@ -468,12 +495,45 @@ class SwapGUI(ctk.CTk):
         self._stop_btn.configure(state="disabled")
         self._stop_session = None
 
+    def _on_enable_voice(self) -> None:
+        """Voice toggle entry-point (Sprint 13a placeholder).
+
+        13b will wire this to a modal that runs `voice_prereq.check_all()`,
+        guides install, downloads OpenVoice weights, and expands the section.
+        Today it just runs the prereq check and surfaces the result so the
+        user (and the dev) can see what the modal will eventually show.
+        """
+        from . import voice_prereq
+
+        result = voice_prereq.check_all()
+
+        def line(c: voice_prereq.Check, name: str) -> str:
+            mark = "✓" if c.ok else "✗"
+            hint = f"  → {c.hint}" if (c.hint and not c.ok) else ""
+            return f"  {mark} {name}: {c.label}{hint}"
+
+        message = (
+            "Voice cloning prerequisites:\n"
+            f"{line(result.gpu, 'GPU')}\n"
+            f"{line(result.deps_installed, 'Voice deps')}\n"
+            f"{line(result.weights, 'OpenVoice weights')}\n"
+            f"{line(result.audio_cable, 'Virtual audio cable')}\n\n"
+            "Voice cloning is coming in Sprint 13b. The full Enable wizard "
+            "(install + download + restart) lands then. For now the toggle "
+            "is non-functional."
+        )
+        print(message, flush=True)
+        self._status_var.set(
+            "Voice: prereq check printed to terminal · clone coming in 13b."
+        )
+
     def _set_running(self, running: bool) -> None:
         self._live_btn.configure(state="disabled" if running else "normal")
         self._stop_btn.configure(state="normal" if running else "disabled")
         self._select_face_btn.configure(state="disabled" if running else "normal")
         self._camera_dropdown.configure(state="disabled" if running else "readonly")
         self._tier_dropdown.configure(state="disabled" if running else "readonly")
+        self._enable_voice_btn.configure(state="disabled" if running else "normal")
 
     def _raise_to_front(self) -> None:
         """Flash the window topmost for one beat so it's visible at startup."""

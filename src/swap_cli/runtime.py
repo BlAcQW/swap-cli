@@ -45,6 +45,11 @@ class RunOptions:
     # the session is set up. Calling that function from any thread cleanly
     # winds down the live session.
     on_runtime_ready: Callable[[Callable[[], None]], None] | None = None
+    # Voice cloning (optional, sprint 13). All None = video-only, current behavior.
+    # When all three are set, run_session will spin a parallel voice task in 13b.
+    reference_voice: str | None = None  # voice id (library) or path to WAV/MP3
+    microphone_device: int | None = None  # sounddevice mic index
+    voice_output_device: int | None = None  # virtual cable index for routing
 
 
 async def run_session(opts: RunOptions) -> None:
