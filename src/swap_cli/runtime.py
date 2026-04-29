@@ -80,6 +80,7 @@ async def run_session(opts: RunOptions) -> None:
     client = DecartClient(api_key=opts.decart_api_key)
     quit_event = asyncio.Event()
     notify = opts.on_status_change
+    voice_track: Any = None  # populated by _maybe_start_voice if opts say so
 
     # Hand the caller a thread-safe stop function. The GUI's Stop button
     # calls this from the tk main thread; we schedule quit_event.set() on
@@ -154,9 +155,18 @@ async def run_session(opts: RunOptions) -> None:
             )
 
         notify("Connected · waiting for first frame…")
+
+        # Sprint 13b: voice cloning runs as a parallel asyncio task in the
+        # same loop. If it fails, video continues — voice failures don't
+        # take the session down.
+        voice_track = await _maybe_start_voice(opts, notify)
+
         await quit_event.wait()
         print()  # newline after the tick line
     finally:
+        if voice_track is not None:
+            with suppress(Exception):
+                await voice_track.stop()
         if realtime_client is not None:
             with suppress(Exception):
                 await realtime_client.disconnect()
@@ -167,6 +177,38 @@ async def run_session(opts: RunOptions) -> None:
         with suppress(Exception):
             await client.close()
         camera.stop()
+
+
+async def _maybe_start_voice(opts: RunOptions, notify: Callable[[str], None]) -> Any:
+    """Spin a parallel voice cloning track if the user opted in.
+
+    Returns the started VoiceTrack (so run_session can stop it on cleanup),
+    or None if voice was off / unavailable. All failures are caught and
+    surfaced via notify — voice issues never kill the video session.
+    """
+    if not (opts.reference_voice and opts.microphone_device is not None):
+        return None
+    try:
+        from . import voice_library, voice_track as voice_track_mod
+
+        target = voice_library.find_voice(opts.reference_voice)
+        if target is None:
+            notify(f"Voice: '{opts.reference_voice}' not found in library.")
+            return None
+        track = voice_track_mod.VoiceTrack(
+            voice_track_mod.VoiceTrackOptions(
+                voice=target,
+                microphone_device=opts.microphone_device,
+                output_device=opts.voice_output_device,
+            )
+        )
+        track.start(on_status=notify)
+        notify(f"Voice: started ({target.name})")
+        return track
+    except Exception as err:  # noqa: BLE001
+        notify(f"Voice: disabled ({err})")
+        print(f"[runtime] voice failed to start: {err}", flush=True)
+        return None
 
 
 # Mutable container so the on_remote_stream callback can hand the display

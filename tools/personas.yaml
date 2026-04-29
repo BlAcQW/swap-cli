@@ -1,0 +1,107 @@
+# swap-cli starter voice library
+#
+# This file is the source-of-truth for which voices ship in
+# src/swap_cli/voices/library/. Each entry is a fictional persona that
+# tools/build_library.py converts into a JSON embedding by:
+#   1. Picking the named XTTS-v2 built-in speaker latent.
+#   2. Synthesizing 30s of speech from it (a stable script).
+#   3. Running the result through OpenVoice's tone-color extractor.
+#   4. Writing src/swap_cli/voices/library/<id>.json + <id>_preview.wav.
+#
+# Run on any machine that has torch + xtts-v2 + openvoice installed
+# (CPU is fine — extraction is cheap; only synthesis benefits from GPU).
+# Output is committed to git so end users never run this script.
+
+voices:
+  - id: aria
+    name: Aria
+    description: Warm female narrator
+    xtts_speaker: Sofia Hellen
+
+  - id: ben
+    name: Ben
+    description: Friendly male host
+    xtts_speaker: Damien Black
+
+  - id: sage
+    name: Sage
+    description: Deep authoritative male narrator
+    xtts_speaker: Royston Min
+
+  - id: river
+    name: River
+    description: Soft neutral, podcast-friendly
+    xtts_speaker: Tammie Ema
+
+  - id: jamie
+    name: Jamie
+    description: Energetic young female, vlogger
+    xtts_speaker: Lidiya Szekeres
+
+  - id: max
+    name: Max
+    description: Confident salesperson tone
+    xtts_speaker: Wulf Carlevaro
+
+  - id: iris
+    name: Iris
+    description: Sharp British female news anchor
+    xtts_speaker: Henriette Usha
+
+  - id: vox
+    name: Vox
+    description: Robotic / synthesized, sci-fi
+    xtts_speaker: Adde Michal
+
+  - id: sprite
+    name: Sprite
+    description: Playful cartoon-y high pitch
+    xtts_speaker: Asya Anara
+
+  - id: nox
+    name: Nox
+    description: Dark whispered villain
+    xtts_speaker: Filip Traverse
+
+  - id: riley
+    name: Riley
+    description: Posh British presenter
+    xtts_speaker: Suad Qasim
+
+  - id: niamh
+    name: Niamh
+    description: Irish female lilt
+    xtts_speaker: Eugenio Mataracı
+
+  - id: andre
+    name: Andre
+    description: French-accented English male
+    xtts_speaker: Ferran Simen
+
+  - id: yara
+    name: Yara
+    description: West African / Ghanaian female
+    xtts_speaker: Kazuhiko Atallah
+
+  - id: rafael
+    name: Rafael
+    description: Spanish-accented English male
+    xtts_speaker: Viktor Eka
+
+  - id: default-female
+    name: Default Female
+    description: Plain American female, no accent
+    xtts_speaker: Camilla Holmström
+
+  - id: default-male
+    name: Default Male
+    description: Plain American male, no accent
+    xtts_speaker: Marcos Rudaski
+
+# Reference script for synthesis. Stable across rebuilds so embeddings are
+# reproducible. Length keeps the OpenVoice extractor happy (>10s of source).
+synthesis_script: |
+  Hello, this is a sample voice for the swap CLI library. I am speaking
+  in a calm, conversational tone. The quick brown fox jumps over the
+  lazy dog. Pack my box with five dozen liquor jugs. Sphinx of black
+  quartz, judge my vow. The five boxing wizards jump quickly.

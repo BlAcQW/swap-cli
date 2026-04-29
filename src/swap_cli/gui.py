@@ -76,6 +76,7 @@ class SwapGUI(ctk.CTk):
         self._build_ui()
         self._refresh_cameras()
         self._refresh_status()
+        self._refresh_voice_section()
 
     # ── UI build ──────────────────────────────────────────────────────
 
@@ -224,15 +225,17 @@ class SwapGUI(ctk.CTk):
             command=self._refresh_cameras,
         ).grid(row=1, column=1)
 
-        # Voice section (Sprint 13a — opt-in, default collapsed). The modal
-        # logic + library dropdown lands in 13b; today this is just the toggle
-        # surface so users see "Voice features coming" and we can verify
-        # placement before plumbing the rest.
+        # Voice section (Sprint 13b). Two states:
+        # - collapsed: single line with Off label + Enable… button → opens modal
+        # - expanded: library dropdown + mic dropdown when toggle ON
+        # Restored from config.voice_enabled at startup.
         voice_row = ctk.CTkFrame(outer, fg_color="transparent")
         voice_row.pack(fill="x", pady=(14, 0))
         ctk.CTkLabel(
             voice_row, text="Voice", anchor="w", font=ctk.CTkFont(size=11)
         ).pack(anchor="w")
+
+        # Collapsed row (default state)
         self._voice_collapsed_row = ctk.CTkFrame(voice_row, fg_color="transparent")
         self._voice_collapsed_row.pack(fill="x")
         ctk.CTkLabel(
@@ -250,6 +253,39 @@ class SwapGUI(ctk.CTk):
             command=self._on_enable_voice,
         )
         self._enable_voice_btn.pack(side="right")
+
+        # Expanded row (hidden until voice is enabled)
+        self._voice_expanded_row = ctk.CTkFrame(voice_row, fg_color="transparent")
+        # not packed yet — _refresh_voice_section() shows it when voice is on
+        self._voice_var = tk.StringVar(value="(no voices found)")
+        self._voice_dropdown = ctk.CTkComboBox(
+            self._voice_expanded_row,
+            values=[],
+            variable=self._voice_var,
+            state="readonly",
+            height=30,
+        )
+        self._voice_dropdown.pack(fill="x", pady=(2, 4))
+        voice_actions = ctk.CTkFrame(self._voice_expanded_row, fg_color="transparent")
+        voice_actions.pack(fill="x")
+        self._voice_status_label = ctk.CTkLabel(
+            voice_actions,
+            text="On · cloning enabled",
+            anchor="w",
+            text_color="#10b981",
+        )
+        self._voice_status_label.pack(side="left", fill="x", expand=True)
+        self._disable_voice_btn = ctk.CTkButton(
+            voice_actions,
+            text="Disable",
+            width=72,
+            height=24,
+            corner_radius=6,
+            fg_color="#374151",
+            hover_color="#4b5563",
+            command=self._on_disable_voice,
+        )
+        self._disable_voice_btn.pack(side="right")
 
         # Action buttons row
         actions = ctk.CTkFrame(outer, fg_color="transparent")
@@ -407,6 +443,13 @@ class SwapGUI(ctk.CTk):
         def _capture_stop(stop_fn: Callable[[], None]) -> None:
             self._stop_session = stop_fn
 
+        # Voice opts: only set when toggle is on AND a library/user voice is
+        # picked. microphone_device defaults to system default (None) until
+        # 13b.2 wires the mic dropdown — voice_track will use sounddevice's
+        # default input. None on any of these = video-only path.
+        voice_id = self._selected_voice_id() if cfg.voice_enabled else None
+        mic_device = cfg.last_microphone if cfg.voice_enabled else None
+
         opts = RunOptions(
             decart_api_key=cfg.decart_api_key or "",
             reference=str(self._reference_path),
@@ -416,7 +459,14 @@ class SwapGUI(ctk.CTk):
             record=record_path,
             on_status_change=_emit_status,
             on_runtime_ready=_capture_stop,
+            reference_voice=voice_id,
+            microphone_device=mic_device if mic_device is not None else (0 if voice_id else None),
+            voice_output_device=cfg.last_voice_output,
         )
+
+        # Persist the voice id so next launch defaults to it.
+        if voice_id and voice_id != cfg.last_voice_id:
+            config.update(last_voice_id=voice_id)
 
         self._stop_event = asyncio.Event()
         self._set_running(True)
@@ -496,36 +546,72 @@ class SwapGUI(ctk.CTk):
         self._stop_session = None
 
     def _on_enable_voice(self) -> None:
-        """Voice toggle entry-point (Sprint 13a placeholder).
+        """Open the Enable Voice modal: prereq check + guided install."""
+        modal = _EnableVoiceModal(self)
+        modal.grab_set()  # modal: blocks input on the main window
 
-        13b will wire this to a modal that runs `voice_prereq.check_all()`,
-        guides install, downloads OpenVoice weights, and expands the section.
-        Today it just runs the prereq check and surfaces the result so the
-        user (and the dev) can see what the modal will eventually show.
-        """
-        from . import voice_prereq
+    def _on_disable_voice(self) -> None:
+        """Turn voice off (sticky in config). Doesn't uninstall deps."""
+        from . import config as _config
 
-        result = voice_prereq.check_all()
+        _config.update(voice_enabled=False)
+        self._status_var.set("Voice: disabled.")
+        self._refresh_voice_section()
 
-        def line(c: voice_prereq.Check, name: str) -> str:
-            mark = "✓" if c.ok else "✗"
-            hint = f"  → {c.hint}" if (c.hint and not c.ok) else ""
-            return f"  {mark} {name}: {c.label}{hint}"
+    def _refresh_voice_section(self) -> None:
+        """Show collapsed vs expanded voice UI based on config.voice_enabled."""
+        from . import config as _config
 
-        message = (
-            "Voice cloning prerequisites:\n"
-            f"{line(result.gpu, 'GPU')}\n"
-            f"{line(result.deps_installed, 'Voice deps')}\n"
-            f"{line(result.weights, 'OpenVoice weights')}\n"
-            f"{line(result.audio_cable, 'Virtual audio cable')}\n\n"
-            "Voice cloning is coming in Sprint 13b. The full Enable wizard "
-            "(install + download + restart) lands then. For now the toggle "
-            "is non-functional."
-        )
-        print(message, flush=True)
-        self._status_var.set(
-            "Voice: prereq check printed to terminal · clone coming in 13b."
-        )
+        cfg = _config.load()
+        if cfg.voice_enabled:
+            # Hide collapsed row, show expanded with library dropdown.
+            try:
+                self._voice_collapsed_row.pack_forget()
+            except Exception:
+                pass
+            if not self._voice_expanded_row.winfo_ismapped():
+                self._voice_expanded_row.pack(fill="x", pady=(2, 0))
+            self._populate_voice_library(cfg.last_voice_id)
+        else:
+            try:
+                self._voice_expanded_row.pack_forget()
+            except Exception:
+                pass
+            if not self._voice_collapsed_row.winfo_ismapped():
+                self._voice_collapsed_row.pack(fill="x")
+
+    def _populate_voice_library(self, preferred_id: str | None) -> None:
+        from . import voice_library
+
+        voices = voice_library.load_all_voices()
+        if not voices:
+            self._voice_dropdown.configure(values=["(no voices found)"])
+            self._voice_var.set("(no voices found)")
+            return
+
+        labels = [self._format_voice_label(v) for v in voices]
+        self._voice_dropdown.configure(values=labels)
+        self._voice_label_to_id = {
+            self._format_voice_label(v): v.id for v in voices
+        }
+
+        # Restore previously selected voice if still present, else default to first.
+        chosen_label = labels[0]
+        if preferred_id:
+            for v, label in zip(voices, labels, strict=False):
+                if v.id == preferred_id:
+                    chosen_label = label
+                    break
+        self._voice_var.set(chosen_label)
+
+    @staticmethod
+    def _format_voice_label(voice) -> str:  # type: ignore[no-untyped-def]
+        suffix = "library" if voice.is_library else "custom"
+        return f"{voice.name} — {voice.description}  [{suffix}]"
+
+    def _selected_voice_id(self) -> str | None:
+        label_to_id = getattr(self, "_voice_label_to_id", {})
+        return label_to_id.get(self._voice_var.get())
 
     def _set_running(self, running: bool) -> None:
         self._live_btn.configure(state="disabled" if running else "normal")
@@ -534,6 +620,11 @@ class SwapGUI(ctk.CTk):
         self._camera_dropdown.configure(state="disabled" if running else "readonly")
         self._tier_dropdown.configure(state="disabled" if running else "readonly")
         self._enable_voice_btn.configure(state="disabled" if running else "normal")
+        try:
+            self._voice_dropdown.configure(state="disabled" if running else "readonly")
+            self._disable_voice_btn.configure(state="disabled" if running else "normal")
+        except Exception:
+            pass
 
     def _raise_to_front(self) -> None:
         """Flash the window topmost for one beat so it's visible at startup."""
@@ -544,6 +635,187 @@ class SwapGUI(ctk.CTk):
             self.focus_force()
         except Exception:  # noqa: BLE001 — non-fatal cosmetic
             pass
+
+
+class _EnableVoiceModal(ctk.CTkToplevel):
+    """Voice setup wizard. Shows prereq checks inline, lets user run install.
+
+    On success, sets config.voice_enabled = True and refreshes the parent
+    GUI's voice section so the library dropdown appears.
+    """
+
+    def __init__(self, parent: SwapGUI) -> None:
+        super().__init__(parent)
+        self._parent = parent
+        self.title("Enable voice cloning")
+        self.geometry("520x440")
+        self.resizable(False, False)
+        # Center over parent.
+        self.after(0, self._center_on_parent)
+
+        outer = ctk.CTkFrame(self, fg_color="transparent")
+        outer.pack(fill="both", expand=True, padx=20, pady=18)
+
+        ctk.CTkLabel(
+            outer,
+            text="Voice cloning prerequisites",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
+        self._checks_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
+        self._checks_frame.pack(fill="x", pady=(0, 10))
+        self._render_prereqs()
+
+        ctk.CTkLabel(
+            outer,
+            text=(
+                "Voice features add ~3 GB of dependencies plus an OpenVoice\n"
+                "model checkpoint. Audio routing into Zoom/OBS needs a virtual\n"
+                "audio cable (BlackHole on macOS, VB-Cable on Windows)."
+            ),
+            anchor="w",
+            justify="left",
+            text_color="#9ca3af",
+        ).pack(fill="x", pady=(0, 12))
+
+        self._status_var = tk.StringVar(value="")
+        ctk.CTkLabel(
+            outer,
+            textvariable=self._status_var,
+            anchor="w",
+            text_color="#10b981",
+        ).pack(fill="x")
+
+        # Action buttons
+        actions = ctk.CTkFrame(outer, fg_color="transparent")
+        actions.pack(fill="x", side="bottom", pady=(12, 0))
+        actions.columnconfigure((0, 1), weight=1, uniform="ev")
+
+        self._skip_btn = ctk.CTkButton(
+            actions,
+            text="Skip — keep video only",
+            command=self._on_skip,
+            height=36,
+            fg_color="#374151",
+            hover_color="#4b5563",
+        )
+        self._skip_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        self._continue_btn = ctk.CTkButton(
+            actions,
+            text="Continue",
+            command=self._on_continue,
+            height=36,
+            fg_color="#ec4899",
+            hover_color="#db2777",
+        )
+        self._continue_btn.grid(row=0, column=1, sticky="ew")
+
+    def _render_prereqs(self) -> None:
+        # Wipe and re-render — called after each step so the UI tracks state.
+        for child in self._checks_frame.winfo_children():
+            child.destroy()
+
+        from . import voice_prereq
+
+        result = voice_prereq.check_all()
+        self._latest_result = result
+
+        rows = [
+            ("GPU", result.gpu),
+            ("Voice deps (torch, sounddevice, librosa)", result.deps_installed),
+            ("OpenVoice weights", result.weights),
+            ("Virtual audio cable", result.audio_cable),
+        ]
+        for title, check in rows:
+            row = ctk.CTkFrame(self._checks_frame, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=4)
+            ctk.CTkLabel(
+                row,
+                text="✓" if check.ok else "✗",
+                width=20,
+                text_color="#10b981" if check.ok else "#ef4444",
+                font=ctk.CTkFont(size=14, weight="bold"),
+            ).pack(side="left")
+            label_text = f"{title}: {check.label}"
+            if check.hint and not check.ok:
+                label_text += f"  → {check.hint}"
+            ctk.CTkLabel(
+                row,
+                text=label_text,
+                anchor="w",
+                justify="left",
+                wraplength=420,
+            ).pack(side="left", fill="x", expand=True)
+
+        # If GPU is blocked, replace the Continue button with a Got-it close.
+        if hasattr(self, "_continue_btn") and result.gpu_blocked:
+            self._continue_btn.configure(
+                text="Got it — keep video only",
+                command=self._on_skip,
+            )
+
+    def _center_on_parent(self) -> None:
+        try:
+            px = self._parent.winfo_x()
+            py = self._parent.winfo_y()
+            pw = self._parent.winfo_width()
+            ph = self._parent.winfo_height()
+            ww = 520
+            wh = 440
+            x = px + (pw - ww) // 2
+            y = py + (ph - wh) // 2
+            self.geometry(f"{ww}x{wh}+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+    def _on_skip(self) -> None:
+        self.destroy()
+
+    def _on_continue(self) -> None:
+        # Disable buttons during install.
+        self._skip_btn.configure(state="disabled")
+        self._continue_btn.configure(state="disabled", text="Installing…")
+        self._status_var.set("Installing voice deps + downloading weights …")
+        self.update_idletasks()
+        # Run the install in a worker thread so the UI stays responsive.
+        threading.Thread(target=self._install_worker, daemon=True).start()
+
+    def _install_worker(self) -> None:
+        from . import config as _config
+        from . import voice_ops, voice_prereq
+
+        try:
+            pre = voice_prereq.check_all()
+            if not pre.deps_installed.ok:
+                ok = voice_ops.install_voice_deps()
+                if not ok:
+                    self._on_install_error("pip install failed")
+                    return
+            if not pre.weights.ok:
+                voice_ops.download_openvoice_weights()
+            _config.update(voice_enabled=True)
+            self.after(0, self._on_install_done)
+        except Exception as err:  # noqa: BLE001
+            self.after(0, lambda e=err: self._on_install_error(str(e)))
+
+    def _on_install_done(self) -> None:
+        self._status_var.set("✓ Voice features ready.")
+        self._render_prereqs()
+        self._skip_btn.configure(state="normal", text="Close")
+        self._continue_btn.configure(text="Done", command=self._finish_and_close)
+        self._continue_btn.configure(state="normal")
+
+    def _on_install_error(self, msg: str) -> None:
+        self._status_var.set(f"✗ {msg}")
+        self._skip_btn.configure(state="normal", text="Close")
+        self._continue_btn.configure(state="normal", text="Retry", command=self._on_continue)
+
+    def _finish_and_close(self) -> None:
+        self._parent._refresh_voice_section()
+        self._parent._status_var.set("Voice: enabled. Pick a voice to use.")
+        self.destroy()
 
 
 def launch() -> None:

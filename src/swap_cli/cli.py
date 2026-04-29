@@ -237,12 +237,14 @@ def run(
 
 @voices_app.command("install")
 def voices_install() -> None:
-    """Install the optional voice extra and download OpenVoice weights.
+    """Install voice deps + download OpenVoice weights (~5 GB).
 
-    Runs `pip install 'swap-cli[voice]'` against the current interpreter to
-    pull torch + sounddevice + librosa (~3 GB). Weight download lands in 13b.
+    Pulls torch + sounddevice + librosa via pip, then downloads the
+    OpenVoice tone-color converter checkpoint to the user data dir.
+    Sprint 13b.1 writes a sentinel marker; 13b.2 fetches the real ~5 GB
+    of weights.
     """
-    from . import voice_prereq
+    from . import voice_ops, voice_prereq
 
     pre = voice_prereq.check_all()
     if not pre.gpu.ok:
@@ -253,54 +255,73 @@ def voices_install() -> None:
         raise typer.Exit(2)
 
     if pre.deps_installed.ok:
-        console.print(f"[green]✓ voice deps already installed.[/green]")
+        console.print("[green]✓ voice deps already installed.[/green]")
     else:
         console.print(
             "Installing voice deps via "
-            f"[bold]{sys.executable} -m pip install 'swap-cli[voice]'[/bold] …"
+            f"[bold]{sys.executable} -m pip install '.[voice]'[/bold] …"
         )
-        cmd = [sys.executable, "-m", "pip", "install", "swap-cli[voice]"]
-        # Editable installs (`pip install -e .`) need the local path syntax.
-        if (Path.cwd() / "pyproject.toml").exists():
-            cmd = [sys.executable, "-m", "pip", "install", "-e", ".[voice]"]
-        try:
-            import subprocess
+        if not voice_ops.install_voice_deps():
+            err_console.print("[red]pip install failed.[/red]")
+            raise typer.Exit(1)
+        console.print("[green]✓ voice deps installed.[/green]")
 
-            subprocess.check_call(cmd)
-            console.print("[green]✓ voice deps installed[/green]")
-        except subprocess.CalledProcessError as err:
-            err_console.print(f"[red]pip install failed: {err}[/red]")
-            raise typer.Exit(1) from err
+    if pre.weights.ok:
+        console.print(
+            f"[green]✓ OpenVoice weights already present at "
+            f"{voice_prereq.openvoice_weights_dir()}.[/green]"
+        )
+    else:
+        console.print("Downloading OpenVoice weights …")
+        target = voice_ops.download_openvoice_weights()
+        console.print(f"[green]✓ weights ready at {target}.[/green]")
 
     console.print(
-        "\n[yellow]Note:[/yellow] OpenVoice weight download (~5 GB) lands in "
-        "Sprint 13b. Voice cloning is not yet usable."
+        "\n[dim]13b.1 status: weights are a placeholder; real ~5 GB download "
+        "lands in 13b.2 along with the realtime tone-color converter.[/dim]"
     )
 
 
 @voices_app.command("uninstall")
 def voices_uninstall() -> None:
-    """Remove OpenVoice weights from disk (frees ~5 GB)."""
-    from . import voice_prereq
+    """Remove OpenVoice weights from disk."""
+    from . import voice_ops
 
-    weights = voice_prereq.openvoice_weights_dir()
-    if not weights.exists():
+    if voice_ops.uninstall_openvoice_weights():
+        console.print("[green]✓ OpenVoice weights removed.[/green]")
+    else:
         console.print("[dim]No weights present — nothing to remove.[/dim]")
-        return
-    console.print(
-        f"[yellow]Sprint 13b will remove[/yellow] {weights} "
-        f"(~5 GB once weights actually ship)."
-    )
 
 
 @voices_app.command("list")
 def voices_list() -> None:
     """List the bundled library + any user-added voices."""
-    console.print(
-        "[yellow]Coming in Sprint 13b.[/yellow] Will print the bundled "
-        "library (Aria, Ben, Sage, …) and any voices you added via "
-        "[bold]swap voices add[/bold]."
-    )
+    from . import voice_ops
+
+    library, user = voice_ops.list_all()
+
+    table = Table(title="Library voices (bundled)", show_header=True, box=None)
+    table.add_column("id", style="dim")
+    table.add_column("name")
+    table.add_column("description")
+    if not library:
+        table.add_row("(empty)", "—", "Run a swap-cli release that bundles voices.")
+    for v in library:
+        table.add_row(v.id, v.name, v.description)
+    console.print(table)
+
+    table = Table(title="Your voices (custom)", show_header=True, box=None)
+    table.add_column("id", style="dim")
+    table.add_column("name")
+    table.add_column("description")
+    if not user:
+        table.add_row(
+            "(empty)", "—",
+            "Add one with `swap voices add ./me.wav --name \"Me\"`."
+        )
+    for v in user:
+        table.add_row(v.id, v.name, v.description)
+    console.print(table)
 
 
 @voices_app.command("add")
@@ -312,26 +333,38 @@ def voices_add(
     ] = None,
 ) -> None:
     """Add a custom reference voice from a WAV/MP3."""
-    if not path.exists():
-        err_console.print(f"[red]File not found: {path}[/red]")
-        raise typer.Exit(1)
-    voice_name = name or path.stem
+    from . import voice_ops
+
+    try:
+        voice = voice_ops.add_user_voice(path, name)
+    except FileNotFoundError as err:
+        err_console.print(f"[red]{err}[/red]")
+        raise typer.Exit(1) from err
+    except RuntimeError as err:
+        err_console.print(f"[red]{err}[/red]")
+        raise typer.Exit(2) from err
+
     console.print(
-        f"[yellow]Coming in Sprint 13b.[/yellow] Will extract an OpenVoice "
-        f"embedding from [bold]{path}[/bold] and save as "
-        f"[bold]{voice_name}[/bold]."
+        f"[green]✓ Added[/green] [bold]{voice.name}[/bold] "
+        f"(id: {voice.id}) — {voice.description}\n"
+        f"[dim]Saved to {voice_ops.user_voices_dir() / (voice.id + '.json')}[/dim]"
     )
 
 
 @voices_app.command("remove")
 def voices_remove(
-    name: Annotated[str, typer.Argument(help="Voice name to remove.")],
+    name: Annotated[str, typer.Argument(help="Voice name or id to remove.")],
 ) -> None:
     """Remove a custom voice from your library."""
-    console.print(
-        f"[yellow]Coming in Sprint 13b.[/yellow] Will delete custom voice "
-        f"[bold]{name}[/bold] from ~/.swap/voices/."
-    )
+    from . import voice_ops
+
+    if voice_ops.remove_user_voice(name):
+        console.print(f"[green]✓ Removed[/green] {name}.")
+    else:
+        err_console.print(
+            f"[red]No user voice named/id matching '{name}'.[/red]"
+        )
+        raise typer.Exit(1)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
