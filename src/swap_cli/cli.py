@@ -26,8 +26,7 @@ app = typer.Typer(
 console = Console()
 err_console = Console(stderr=True)
 
-# Voice cloning subcommand group (Sprint 13). 13a ships the install hook +
-# stubs for list/add/remove; 13b fills in the rest.
+# Voice cloning subcommand group.
 voices_app = typer.Typer(
     name="voices",
     help="Manage voice cloning library and dependencies (optional feature).",
@@ -231,18 +230,15 @@ def run(
 
 
 # ── voices ─────────────────────────────────────────────────────────────────
-# Sprint 13a: install hook is real; list/add/remove are stubs that print
-# the planned behavior. 13b implements the rest.
 
 
 @voices_app.command("install")
 def voices_install() -> None:
-    """Install voice deps + download OpenVoice weights (~5 GB).
+    """Install voice deps + download OpenVoice tone-color weights (~300 MB).
 
-    Pulls torch + sounddevice + librosa via pip, then downloads the
-    OpenVoice tone-color converter checkpoint to the user data dir.
-    Sprint 13b.1 writes a sentinel marker; 13b.2 fetches the real ~5 GB
-    of weights.
+    Pulls torch + torchaudio + sounddevice + librosa + soundfile +
+    huggingface-hub + OpenVoice via pip, then downloads the converter
+    checkpoint to the user data dir.
     """
     from . import voice_ops, voice_prereq
 
@@ -277,8 +273,9 @@ def voices_install() -> None:
         console.print(f"[green]✓ weights ready at {target}.[/green]")
 
     console.print(
-        "\n[dim]13b.1 status: weights are a placeholder; real ~5 GB download "
-        "lands in 13b.2 along with the realtime tone-color converter.[/dim]"
+        "\n[dim]Voice cloning ready. Open `swap gui`, click Enable, "
+        "pick a voice from the library and a virtual audio cable as the "
+        "output. Click ③ Live and you're cloning live.[/dim]"
     )
 
 

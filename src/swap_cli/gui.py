@@ -444,11 +444,29 @@ class SwapGUI(ctk.CTk):
             self._stop_session = stop_fn
 
         # Voice opts: only set when toggle is on AND a library/user voice is
-        # picked. microphone_device defaults to system default (None) until
-        # 13b.2 wires the mic dropdown — voice_track will use sounddevice's
-        # default input. None on any of these = video-only path.
+        # picked. We resolve the mic + virtual cable here using
+        # voice_router's auto-detect so the user doesn't have to pick from
+        # a sounddevice-numbered list — config remembers their last choice
+        # if they had one. None on any of these = video-only path.
         voice_id = self._selected_voice_id() if cfg.voice_enabled else None
-        mic_device = cfg.last_microphone if cfg.voice_enabled else None
+        mic_device: int | None = None
+        out_device: int | None = None
+        if voice_id:
+            from . import voice_router
+
+            mic = voice_router.pick_input_device(cfg.last_microphone)
+            mic_device = int(mic["index"]) if mic else 0  # fall back to default
+            out = voice_router.pick_output_device(cfg.last_voice_output)
+            out_device = int(out["index"]) if out else None
+            if out_device is None:
+                _emit_status(
+                    "Voice on, but no virtual audio cable detected — "
+                    "converted audio will be silent. Install BlackHole / VB-Cable."
+                )
+            # Persist for next launch.
+            from . import config as _config
+
+            _config.update(last_microphone=mic_device, last_voice_output=out_device)
 
         opts = RunOptions(
             decart_api_key=cfg.decart_api_key or "",
@@ -460,8 +478,8 @@ class SwapGUI(ctk.CTk):
             on_status_change=_emit_status,
             on_runtime_ready=_capture_stop,
             reference_voice=voice_id,
-            microphone_device=mic_device if mic_device is not None else (0 if voice_id else None),
-            voice_output_device=cfg.last_voice_output,
+            microphone_device=mic_device,
+            voice_output_device=out_device,
         )
 
         # Persist the voice id so next launch defaults to it.

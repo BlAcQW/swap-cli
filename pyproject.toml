@@ -42,6 +42,11 @@ voice = [
     "torchaudio>=2.2",
     "sounddevice>=0.4",
     "librosa>=0.10",
+    "soundfile>=0.12",
+    "huggingface-hub>=0.20",
+    # OpenVoice v2 isn't on PyPI under a stable name — install from MyShell's
+    # repo. Tone-color converter only; we don't use the MeloTTS base.
+    "openvoice @ git+https://github.com/myshell-ai/OpenVoice.git@main",
 ]
 
 [project.scripts]
@@ -50,6 +55,11 @@ swap = "swap_cli.cli:app"
 [build-system]
 requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# Allow direct git+ references in optional-dependencies (OpenVoice isn't on
+# PyPI under a stable distribution name; we install from MyShell's repo).
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/swap_cli"]

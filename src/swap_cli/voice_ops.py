@@ -1,8 +1,9 @@
 """Implementations for the `swap voices` subcommand group.
 
-Sprint 13b.1: list/add/remove are real (operate on the user voice
-directory). install runs `pip install '[voice]'` and downloads OpenVoice
-weights. Actual voice cloning still no-ops — wired in 13b.2.
+Sprint 13b.2: download_openvoice_weights pulls the real ToneColorConverter
+checkpoint from HuggingFace (~300 MB). list/add/remove operate on the
+user voice directory; add now uses the real OpenVoice tone-color
+extractor via voice_model.extract_embedding.
 """
 
 from __future__ import annotations
@@ -10,7 +11,6 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,12 +43,11 @@ class InstallResult:
     error: str | None = None
 
 
-# OpenVoice v2 weights are ~5 GB. The real download URL belongs to
-# MyShell (the OpenVoice authors) — we mirror it here as a constant so
-# 13b.2 can flip to our own CDN if needed.
-OPENVOICE_RELEASE_URL = (
-    "https://huggingface.co/myshell-ai/OpenVoiceV2/resolve/main"
-)
+# OpenVoice v2's tone-color converter checkpoint lives in MyShell's
+# HuggingFace repo. We only need the `converter/` subtree (~300 MB) — the
+# `base_speakers/` and `bert/` trees are TTS-specific and unused here.
+OPENVOICE_HF_REPO = "myshell-ai/OpenVoiceV2"
+OPENVOICE_INCLUDE_PATTERNS = ["converter/*"]
 
 
 def install_voice_deps() -> bool:
@@ -64,21 +63,35 @@ def install_voice_deps() -> bool:
 
 
 def download_openvoice_weights(progress: callable | None = None) -> Path:  # type: ignore[valid-type]
-    """Download OpenVoice v2 weights to ~/.local/share/swap-cli/models/openvoice-v2/.
+    """Download OpenVoice v2 tone-color converter weights via HF Hub (~300 MB).
 
-    13b.1: marks the directory as ready with a sentinel file so the prereq
-    check passes. Real weight download arrives in 13b.2 once we've nailed
-    which files OpenVoice's converter actually needs.
+    Pulls only `converter/*` from the OpenVoiceV2 repo — base TTS speakers
+    and BERT trees are unused by tone-color conversion. Writes a sentinel
+    `installed.ok` once complete so the prereq check passes.
     """
     target = openvoice_weights_dir()
     target.mkdir(parents=True, exist_ok=True)
 
-    # 13b.2: actually download these. For 13b.1 we just write the sentinel
-    # so the prereq check progresses. This unblocks UX testing of the
-    # Enable wizard without blocking on the 5 GB download.
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
+    except ImportError as err:
+        raise RuntimeError(
+            "huggingface-hub not installed. Run `swap voices install` first."
+        ) from err
+
+    if progress:
+        progress(0.0)
+
+    snapshot_download(
+        repo_id=OPENVOICE_HF_REPO,
+        local_dir=str(target),
+        allow_patterns=OPENVOICE_INCLUDE_PATTERNS,
+        local_dir_use_symlinks=False,
+    )
+
     sentinel = target / "installed.ok"
     sentinel.write_text(
-        f"sprint=13b.1\nplaceholder=true\ndownloaded_at={int(time.time())}\n",
+        f"repo={OPENVOICE_HF_REPO}\ndownloaded_at={int(time.time())}\n",
         encoding="utf-8",
     )
 
@@ -120,8 +133,7 @@ def add_user_voice(wav_path: Path, display_name: str | None = None) -> Voice:
     name = display_name or wav_path.stem.replace("_", " ").replace("-", " ").strip()
     voice_id = slugify(name)
 
-    # 13b.1: extract_embedding currently returns a deterministic placeholder
-    # so the round-trip works. 13b.2 plugs in real OpenVoice extraction.
+    # Real OpenVoice tone-color extraction (13b.2). Runs on CPU in ~5 s.
     embedding = extract_embedding(wav_path)
 
     voice = Voice(

@@ -5,8 +5,8 @@ Picks where the converted voice goes:
   so Zoom/OBS/Discord can pick it up as a microphone source.
 - Optionally also playback through default speakers for self-monitoring.
 
-13b.1: helpers + constants. Actual streaming output is wired into
-voice_track._loop in 13b.2 via sounddevice OutputStream.
+Streaming output itself happens in voice_track._loop. This module hosts
+the helpers the GUI/runtime use to pick the right device for the user.
 """
 
 from __future__ import annotations
@@ -64,3 +64,60 @@ def detect_virtual_cable_in_devices(output_devices: list[dict]) -> dict | None:
         if any(n in name for n in needles):
             return dev
     return None
+
+
+def list_audio_devices() -> tuple[list[dict], list[dict]]:
+    """Return (input_devices, output_devices) by querying sounddevice.
+
+    Each device dict carries at least: index, name, max_input_channels,
+    max_output_channels, default_samplerate. Returns ([], []) if
+    sounddevice isn't installed (i.e. user hasn't run `swap voices install`).
+    """
+    try:
+        import sounddevice as sd  # type: ignore[import-not-found]
+    except ImportError:
+        return [], []
+
+    inputs: list[dict] = []
+    outputs: list[dict] = []
+    try:
+        for idx, dev in enumerate(sd.query_devices()):
+            entry = dict(dev)
+            entry["index"] = idx
+            if int(dev.get("max_input_channels", 0)) > 0:
+                inputs.append(entry)
+            if int(dev.get("max_output_channels", 0)) > 0:
+                outputs.append(entry)
+    except Exception as err:  # noqa: BLE001
+        print(f"[voice_router] device query failed: {err}", flush=True)
+    return inputs, outputs
+
+
+def pick_output_device(preferred_index: int | None = None) -> dict | None:
+    """Best-effort: return the most appropriate output device.
+
+    Order of preference:
+      1. preferred_index (if it's still present in the device list)
+      2. virtual cable detected in the device list (BlackHole / VB-Cable / …)
+      3. None (caller decides whether to fall back to "drop output")
+    """
+    _inputs, outputs = list_audio_devices()
+    if not outputs:
+        return None
+    if preferred_index is not None:
+        for dev in outputs:
+            if dev.get("index") == preferred_index:
+                return dev
+    return detect_virtual_cable_in_devices(outputs)
+
+
+def pick_input_device(preferred_index: int | None = None) -> dict | None:
+    """Pick the user's default microphone (preferred index → first input)."""
+    inputs, _outputs = list_audio_devices()
+    if not inputs:
+        return None
+    if preferred_index is not None:
+        for dev in inputs:
+            if dev.get("index") == preferred_index:
+                return dev
+    return inputs[0]
