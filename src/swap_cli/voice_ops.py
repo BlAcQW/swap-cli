@@ -50,32 +50,42 @@ OPENVOICE_HF_REPO = "myshell-ai/OpenVoiceV2"
 OPENVOICE_INCLUDE_PATTERNS = ["converter/*"]
 
 
-# OpenVoice's package metadata pins librosa==0.9.1, numpy==1.22, av==10.*
-# (av 10 has no Win+Py3.11 wheel and source-builds break on modern Cython).
-# We install OpenVoice with --no-deps so its broken constraints don't poison
-# the resolver. Tone-color conversion at runtime only needs torch + numpy +
-# librosa + soundfile, all of which the [voice] extra already provides.
+# OpenVoice's setup.py pins librosa==0.9.1, numpy==1.22, av==10.* (av 10 has
+# no Win+Py3.11 wheel; source builds break on modern Cython). We install it
+# with --no-deps so its broken constraints don't poison the resolver. The
+# tone-color converter at runtime only needs torch + numpy + librosa +
+# soundfile, which we install directly below.
 OPENVOICE_GIT_URL = "git+https://github.com/myshell-ai/OpenVoice.git@main"
+
+# Voice-cloning dependencies we install directly (NOT via `pip install
+# '.[voice]'` because that would also try to reinstall swap-cli, which on
+# Windows fails with "process cannot access the file" — Windows holds
+# swap.exe open while the install runs from inside it).
+VOICE_PACKAGES = (
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "sounddevice>=0.4",
+    "librosa>=0.10",
+    "soundfile>=0.12",
+    "huggingface-hub>=0.20",
+)
 
 
 def install_voice_deps() -> bool:
-    """Two-step install: clean [voice] extra, then OpenVoice with --no-deps.
+    """Install voice deps without touching swap-cli itself.
 
-    Returns True if both steps succeed.
+    Two pip calls:
+      1. install VOICE_PACKAGES directly — modern resolved versions, no
+         swap-cli reinstall (avoids the Windows swap.exe lock).
+      2. install OpenVoice with --no-deps — keeps its broken transitive
+         pins (faster-whisper → av==10.*, etc.) out of the resolver.
+
+    Returns True iff both steps succeed.
     """
-    base_cmd = [sys.executable, "-m", "pip", "install"]
-    extra = "swap-cli[voice]"
-    if (Path.cwd() / "pyproject.toml").exists():
-        extra = ".[voice]"
-        base_cmd.extend(["-e"])
-
+    pip = [sys.executable, "-m", "pip", "install"]
     try:
-        # Step 1: well-behaved deps from our [voice] extra.
-        subprocess.check_call(base_cmd + [extra])
-        # Step 2: OpenVoice without its bad transitive pins.
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--no-deps", OPENVOICE_GIT_URL]
-        )
+        subprocess.check_call(pip + list(VOICE_PACKAGES))
+        subprocess.check_call(pip + ["--no-deps", OPENVOICE_GIT_URL])
         return True
     except subprocess.CalledProcessError:
         return False
