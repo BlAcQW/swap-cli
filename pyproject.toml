@@ -44,9 +44,11 @@ voice = [
     "librosa>=0.10",
     "soundfile>=0.12",
     "huggingface-hub>=0.20",
-    # OpenVoice v2 isn't on PyPI under a stable name — install from MyShell's
-    # repo. Tone-color converter only; we don't use the MeloTTS base.
-    "openvoice @ git+https://github.com/myshell-ai/OpenVoice.git@main",
+    # OpenVoice v2 isn't on PyPI — install from MyShell's repo. The
+    # distribution name in their setup.py is `myshell-openvoice` (the
+    # importable module is still `openvoice`). Tone-color converter only;
+    # we don't use the MeloTTS base.
+    "myshell-openvoice @ git+https://github.com/myshell-ai/OpenVoice.git@main",
 ]
 
 [project.scripts]
