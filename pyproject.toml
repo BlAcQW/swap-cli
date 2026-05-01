@@ -41,7 +41,9 @@ voice = [
     "torch>=2.2",
     "torchaudio>=2.2",
     "sounddevice>=0.4",
-    "librosa>=0.10",
+    # OpenVoice pins librosa==0.9.1; matching its lower bound so pip can
+    # resolve. 0.9.x has the same spectrogram + resample APIs we use.
+    "librosa>=0.9",
     "soundfile>=0.12",
     "huggingface-hub>=0.20",
     # OpenVoice v2 isn't on PyPI — install from MyShell's repo. The
