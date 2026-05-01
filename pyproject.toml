@@ -12,7 +12,10 @@ dependencies = [
     # Pin here so end users don't hit a ModuleNotFoundError at runtime.
     "tenacity>=8.2",
     "aiortc>=1.9",
-    "av>=11.0",
+    # av: floor 10 because OpenVoice pulls faster-whisper which pins av==10.*.
+    # Our usage (av.VideoFrame.from_ndarray + pts/time_base) is stable across
+    # 10 and 11 — no behavior change for the video pipeline.
+    "av>=10.0",
     "opencv-python>=4.10",
     # OpenVoice's [voice] extra pins numpy==1.22.0; loosen the floor so pip
     # can satisfy both in a single environment. opencv-python and pillow
