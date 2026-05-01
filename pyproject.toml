@@ -14,7 +14,10 @@ dependencies = [
     "aiortc>=1.9",
     "av>=11.0",
     "opencv-python>=4.10",
-    "numpy>=1.26",
+    # OpenVoice's [voice] extra pins numpy==1.22.0; loosen the floor so pip
+    # can satisfy both in a single environment. opencv-python and pillow
+    # are happy with 1.22+.
+    "numpy>=1.22",
     "pillow>=10.0",
     "typer>=0.12",
     "rich>=13.7",
@@ -38,11 +41,13 @@ dev = [
 # in via `swap voices install` from the GUI. PyTorch alone is ~2.5 GB so we
 # never pull this in the base install.
 voice = [
-    "torch>=2.2",
-    "torchaudio>=2.2",
+    # Cap torch to a range known to work with OpenVoice's numpy==1.22 pin.
+    # Torch 2.5+ requires numpy>=1.23 and Torch 2.7+ requires numpy>=1.24.
+    # Sticking to 2.2.x–2.4.x keeps everything compatible.
+    "torch>=2.2,<2.5",
+    "torchaudio>=2.2,<2.5",
     "sounddevice>=0.4",
-    # OpenVoice pins librosa==0.9.1; matching its lower bound so pip can
-    # resolve. 0.9.x has the same spectrogram + resample APIs we use.
+    # OpenVoice pins librosa==0.9.1; match its lower bound so pip resolves.
     "librosa>=0.9",
     "soundfile>=0.12",
     "huggingface-hub>=0.20",
