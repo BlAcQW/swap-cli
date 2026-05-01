@@ -108,8 +108,13 @@ def _check_gpu() -> Check:
 
 
 def _check_deps() -> Check:
-    """True iff `pip install 'swap-cli[voice]'` has been run."""
-    required = ("torch", "torchaudio", "sounddevice", "librosa")
+    """True iff every voice-cloning runtime import is available.
+
+    MUST stay in sync with voice_model.voice_deps_present() — otherwise
+    `swap voices install` reports ✓ while the live session refuses to
+    start because OpenVoice (or another module) is missing.
+    """
+    required = ("torch", "torchaudio", "sounddevice", "librosa", "openvoice")
     missing = [m for m in required if importlib.util.find_spec(m) is None]
     if not missing:
         return Check(ok=True, label="voice deps installed")
