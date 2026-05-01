@@ -12,15 +12,9 @@ dependencies = [
     # Pin here so end users don't hit a ModuleNotFoundError at runtime.
     "tenacity>=8.2",
     "aiortc>=1.9",
-    # av: floor 10 because OpenVoice pulls faster-whisper which pins av==10.*.
-    # Our usage (av.VideoFrame.from_ndarray + pts/time_base) is stable across
-    # 10 and 11 — no behavior change for the video pipeline.
-    "av>=10.0",
+    "av>=11.0",
     "opencv-python>=4.10",
-    # OpenVoice's [voice] extra pins numpy==1.22.0; loosen the floor so pip
-    # can satisfy both in a single environment. opencv-python and pillow
-    # are happy with 1.22+.
-    "numpy>=1.22",
+    "numpy>=1.26",
     "pillow>=10.0",
     "typer>=0.12",
     "rich>=13.7",
@@ -44,21 +38,18 @@ dev = [
 # in via `swap voices install` from the GUI. PyTorch alone is ~2.5 GB so we
 # never pull this in the base install.
 voice = [
-    # Cap torch to a range known to work with OpenVoice's numpy==1.22 pin.
-    # Torch 2.5+ requires numpy>=1.23 and Torch 2.7+ requires numpy>=1.24.
-    # Sticking to 2.2.x–2.4.x keeps everything compatible.
-    "torch>=2.2,<2.5",
-    "torchaudio>=2.2,<2.5",
+    "torch>=2.2",
+    "torchaudio>=2.2",
     "sounddevice>=0.4",
-    # OpenVoice pins librosa==0.9.1; match its lower bound so pip resolves.
-    "librosa>=0.9",
+    "librosa>=0.10",
     "soundfile>=0.12",
     "huggingface-hub>=0.20",
-    # OpenVoice v2 isn't on PyPI — install from MyShell's repo. The
-    # distribution name in their setup.py is `myshell-openvoice` (the
-    # importable module is still `openvoice`). Tone-color converter only;
-    # we don't use the MeloTTS base.
-    "myshell-openvoice @ git+https://github.com/myshell-ai/OpenVoice.git@main",
+    # NOTE: OpenVoice itself is *not* listed here. Its setup.py pins
+    # numpy==1.22, librosa==0.9.1, av==10.* (the last has no Win+Py3.11
+    # wheel and breaks on modern Cython source builds). We install it
+    # separately via `swap voices install` with --no-deps so its broken
+    # transitive constraints don't poison the resolver. Tone-color
+    # conversion only needs torch + numpy + librosa, which are above.
 ]
 
 [project.scripts]

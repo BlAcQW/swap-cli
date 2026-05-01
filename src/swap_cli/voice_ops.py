@@ -50,13 +50,32 @@ OPENVOICE_HF_REPO = "myshell-ai/OpenVoiceV2"
 OPENVOICE_INCLUDE_PATTERNS = ["converter/*"]
 
 
+# OpenVoice's package metadata pins librosa==0.9.1, numpy==1.22, av==10.*
+# (av 10 has no Win+Py3.11 wheel and source-builds break on modern Cython).
+# We install OpenVoice with --no-deps so its broken constraints don't poison
+# the resolver. Tone-color conversion at runtime only needs torch + numpy +
+# librosa + soundfile, all of which the [voice] extra already provides.
+OPENVOICE_GIT_URL = "git+https://github.com/myshell-ai/OpenVoice.git@main"
+
+
 def install_voice_deps() -> bool:
-    """Run `pip install 'swap-cli[voice]'` against the current interpreter."""
-    cmd = [sys.executable, "-m", "pip", "install", "swap-cli[voice]"]
+    """Two-step install: clean [voice] extra, then OpenVoice with --no-deps.
+
+    Returns True if both steps succeed.
+    """
+    base_cmd = [sys.executable, "-m", "pip", "install"]
+    extra = "swap-cli[voice]"
     if (Path.cwd() / "pyproject.toml").exists():
-        cmd = [sys.executable, "-m", "pip", "install", "-e", ".[voice]"]
+        extra = ".[voice]"
+        base_cmd.extend(["-e"])
+
     try:
-        subprocess.check_call(cmd)
+        # Step 1: well-behaved deps from our [voice] extra.
+        subprocess.check_call(base_cmd + [extra])
+        # Step 2: OpenVoice without its bad transitive pins.
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--no-deps", OPENVOICE_GIT_URL]
+        )
         return True
     except subprocess.CalledProcessError:
         return False
