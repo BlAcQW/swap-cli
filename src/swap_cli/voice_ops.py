@@ -68,6 +68,13 @@ VOICE_PACKAGES = (
     "librosa>=0.10",
     "soundfile>=0.12",
     "huggingface-hub>=0.20",
+    # OpenVoice's package __init__ pulls in text-normalization helpers even
+    # for pure tone-color conversion. We install the small runtime ones
+    # ourselves (without the heavy ones we don't need: faster-whisper,
+    # wavmark, melo-tts, etc.).
+    "inflect>=7.0",
+    "unidecode>=1.3",
+    "eng-to-ipa>=0.0.2",
 )
 
 
