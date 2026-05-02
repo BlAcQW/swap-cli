@@ -364,6 +364,123 @@ def voices_remove(
         raise typer.Exit(1)
 
 
+@voices_app.command("test")
+def voices_test(
+    voice: Annotated[
+        str,
+        typer.Option(
+            "--voice",
+            "-v",
+            help="Voice id or name (e.g. 'aria', 'Aria', or your custom voice).",
+        ),
+    ],
+    seconds: Annotated[
+        int,
+        typer.Option(
+            "--seconds",
+            "-s",
+            help="Stop automatically after N seconds. 0 = run until Ctrl+C.",
+        ),
+    ] = 30,
+    mic: Annotated[
+        int | None,
+        typer.Option(
+            "--mic",
+            help="Microphone device index. Default: system default mic.",
+        ),
+    ] = None,
+    output: Annotated[
+        int | None,
+        typer.Option(
+            "--output",
+            help="Output device index. Default: auto-detected virtual cable.",
+        ),
+    ] = None,
+) -> None:
+    """Test voice cloning standalone — no Decart, no tokens spent.
+
+    Opens your mic, runs OpenVoice tone-color conversion against the
+    given voice, writes the converted audio to your virtual cable.
+    Lets you verify voice works without burning Decart credits on the
+    video pipeline.
+    """
+    import asyncio
+
+    from . import voice_library, voice_router
+    from .voice_track import VoiceTrack, VoiceTrackOptions
+
+    target = voice_library.find_voice(voice)
+    if target is None:
+        # Maybe they passed the display name.
+        for v in voice_library.load_all_voices():
+            if v.name.lower() == voice.lower():
+                target = v
+                break
+    if target is None:
+        err_console.print(
+            f"[red]Voice '{voice}' not found.[/red] "
+            "Run [bold]swap voices list[/bold] to see available voices."
+        )
+        raise typer.Exit(1)
+
+    # Resolve mic + output with the same auto-detection the GUI uses.
+    if mic is None:
+        picked = voice_router.pick_input_device(None)
+        mic = int(picked["index"]) if picked else 0
+    if output is None:
+        picked_out = voice_router.pick_output_device(None)
+        output = int(picked_out["index"]) if picked_out else None
+
+    cable_hint = voice_router.virtual_cable_hint()
+    if output is None:
+        err_console.print(
+            f"[yellow]No virtual audio cable detected.[/yellow] "
+            f"Install {cable_hint.name} so apps like Zoom/OBS can hear "
+            f"the cloned voice. Continuing anyway — converted audio "
+            f"will be silent."
+        )
+
+    console.print(
+        Panel.fit(
+            f"voice: [bold]{target.name}[/bold] ({target.source})\n"
+            f"mic device: {mic}\n"
+            f"output device: {output if output is not None else '[dim]none — silent[/dim]'}\n"
+            f"duration: {'until Ctrl+C' if seconds <= 0 else f'{seconds}s'}\n\n"
+            "[dim]No Decart connection. Zero tokens spent.[/dim]",
+            title="▶ swap voices test",
+            border_style="cyan",
+        )
+    )
+
+    async def _run() -> None:
+        track = VoiceTrack(
+            VoiceTrackOptions(
+                voice=target,
+                microphone_device=mic,
+                output_device=output,
+            )
+        )
+        track.start(on_status=lambda s: console.print(f"[dim]{s}[/dim]"))
+        try:
+            if seconds > 0:
+                await asyncio.sleep(seconds)
+            else:
+                # Sleep forever; KeyboardInterrupt breaks us out cleanly.
+                while True:
+                    await asyncio.sleep(60)
+        finally:
+            await track.stop()
+
+    try:
+        asyncio.run(_run())
+        console.print("[green]✓ test complete.[/green]")
+    except KeyboardInterrupt:
+        console.print("\n[dim]interrupted.[/dim]")
+    except Exception as err:  # noqa: BLE001
+        err_console.print(f"[red]test failed: {err}[/red]")
+        raise typer.Exit(1) from err
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
