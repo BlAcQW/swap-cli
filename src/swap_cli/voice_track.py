@@ -34,8 +34,13 @@ if TYPE_CHECKING:
 
 
 SAMPLE_RATE = 16_000
-CHUNK_SAMPLES = 1_600  # 100 ms at 16 kHz
-WARM_UP_SECONDS = 2.0
+# 500 ms windows. OpenVoice was trained on whole utterances, so smaller
+# chunks (100 ms etc.) produce audible clicks at every chunk boundary —
+# the HiFiGAN vocoder loses context between calls. 500 ms gives the model
+# enough runway to be coherent at the cost of ~500 ms of one-way latency,
+# which is still tolerable for a voice call.
+CHUNK_SAMPLES = 8_000
+WARM_UP_SECONDS = 3.0
 WARM_UP_TARGET_SAMPLES = int(SAMPLE_RATE * WARM_UP_SECONDS)
 
 
