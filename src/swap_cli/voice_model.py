@@ -107,7 +107,7 @@ def extract_embedding(wav_path: Path | str, device: str | None = None) -> list[f
     safe to JSON-serialize (used by `swap voices add`).
     """
     converter, _ = _load_converter(device=device or "cpu")
-    se, _audio_name = converter.extract_se(str(wav_path), vad=True)
+    se, _audio_name = converter.extract_se(str(wav_path))
     # se shape: (1, 256, 1) — flatten to a Python list.
     return se.detach().cpu().numpy().reshape(-1).tolist()
 
@@ -192,7 +192,7 @@ class VoiceConverter:
 
         try:
             sf.write(str(tmp_path), source_audio.astype(np.float32), sample_rate)
-            se, _ = self._converter.extract_se(str(tmp_path), vad=True)
+            se, _ = self._converter.extract_se(str(tmp_path))
             self._source_se = se.to(self._converter.device)
         finally:
             tmp_path.unlink(missing_ok=True)
