@@ -86,6 +86,14 @@ VOICE_PACKAGES = (
     "wavmark>=0.0.3",
     "faster-whisper>=1.0",
     "whisper-timestamped>=1.14",
+    # gradio is OpenVoice's web demo UI — not used by tone-color but
+    # imported eagerly at package load. ~40 MB transitive deps.
+    "gradio>=3.48",
+    # openai + python-dotenv are in OpenVoice's requirements.txt (not
+    # setup.py) for their demo notebooks. Included for completeness so
+    # 'import openvoice' never trips on a missing module.
+    "openai",
+    "python-dotenv",
 )
 
 
