@@ -71,6 +71,10 @@ class SwapGUI(ctk.CTk):
         # Set by runtime.run_session via the on_runtime_ready callback. Calling
         # this from the tk main thread cleanly winds the session down.
         self._stop_session: Callable[[], None] | None = None
+        # Voice-only test state (no Decart). Independent of _session_thread.
+        self._voice_test_thread: threading.Thread | None = None
+        self._voice_test_loop: asyncio.AbstractEventLoop | None = None
+        self._voice_test_stop: Callable[[], None] | None = None
         self._status_var = tk.StringVar(value="Idle.")
 
         self._build_ui()
@@ -275,6 +279,17 @@ class SwapGUI(ctk.CTk):
             text_color="#10b981",
         )
         self._voice_status_label.pack(side="left", fill="x", expand=True)
+        self._test_voice_btn = ctk.CTkButton(
+            voice_actions,
+            text="Test voice",
+            width=92,
+            height=24,
+            corner_radius=6,
+            fg_color="#0ea5e9",
+            hover_color="#0284c7",
+            command=self._on_test_voice,
+        )
+        self._test_voice_btn.pack(side="right", padx=(0, 6))
         self._disable_voice_btn = ctk.CTkButton(
             voice_actions,
             text="Disable",
@@ -576,6 +591,129 @@ class SwapGUI(ctk.CTk):
         self._status_var.set("Voice: disabled.")
         self._refresh_voice_section()
 
+    # ── Standalone voice test (no Decart, zero tokens) ─────────────────
+
+    def _on_test_voice(self) -> None:
+        """Toggle: start voice-only test if idle, stop if already running."""
+        if self._voice_test_thread is not None and self._voice_test_thread.is_alive():
+            self._stop_voice_test()
+            return
+        self._start_voice_test()
+
+    def _start_voice_test(self) -> None:
+        # Don't run while a full session is up — they'd both want the mic.
+        if self._session_thread is not None and self._session_thread.is_alive():
+            self._status_var.set("Stop the live session before testing voice.")
+            return
+
+        voice_id = self._selected_voice_id()
+        if not voice_id:
+            self._status_var.set("Pick a voice first.")
+            return
+
+        from . import voice_library, voice_router
+
+        target = voice_library.find_voice(voice_id)
+        if target is None:
+            self._status_var.set(f"Voice '{voice_id}' not found.")
+            return
+
+        mic = voice_router.pick_input_device(None)
+        mic_idx = int(mic["index"]) if mic else 0
+        out = voice_router.pick_output_device(None)
+        out_idx = int(out["index"]) if out else None
+
+        if out_idx is None:
+            cable = voice_router.virtual_cable_hint()
+            self._status_var.set(
+                f"No virtual audio cable detected. Install {cable.name} "
+                "to route the cloned voice to Zoom/Meet/OBS."
+            )
+            # We still run — gives the user a way to verify the model
+            # itself works even without routing.
+
+        def _emit(msg: str) -> None:
+            self.after(0, lambda m=msg: self._status_var.set(m))
+
+        async def _runner() -> None:
+            from .voice_track import VoiceTrack, VoiceTrackOptions
+
+            track = VoiceTrack(
+                VoiceTrackOptions(
+                    voice=target,
+                    microphone_device=mic_idx,
+                    output_device=out_idx,
+                )
+            )
+
+            # Expose a thread-safe stop function back to the tk thread.
+            loop = asyncio.get_running_loop()
+
+            def _request_stop() -> None:
+                loop.call_soon_threadsafe(stop_evt.set)
+
+            self._voice_test_stop = _request_stop
+            stop_evt = asyncio.Event()
+
+            track.start(on_status=_emit)
+            try:
+                await stop_evt.wait()
+            finally:
+                await track.stop()
+
+        def _worker() -> None:
+            print("[gui] voice test thread started", flush=True)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._voice_test_loop = loop
+            try:
+                loop.run_until_complete(_runner())
+            except Exception as err:  # noqa: BLE001
+                import traceback
+
+                traceback.print_exc()
+                _emit(f"Voice test failed: {err}")
+            finally:
+                print("[gui] voice test thread exiting", flush=True)
+                loop.close()
+                self._voice_test_loop = None
+                self._voice_test_stop = None
+                self.after(0, self._voice_test_finished)
+
+        self._set_voice_testing(True)
+        _emit(f"Voice test: starting ({target.name})…")
+        self._voice_test_thread = threading.Thread(target=_worker, daemon=True)
+        self._voice_test_thread.start()
+
+    def _stop_voice_test(self) -> None:
+        if self._voice_test_stop is not None:
+            try:
+                self._voice_test_stop()
+            except Exception as err:  # noqa: BLE001
+                self._status_var.set(f"Voice test stop failed: {err}")
+                return
+        self._test_voice_btn.configure(state="disabled", text="Stopping…")
+
+    def _voice_test_finished(self) -> None:
+        self._set_voice_testing(False)
+        self._voice_test_thread = None
+        self._status_var.set("Voice test ended.")
+
+    def _set_voice_testing(self, testing: bool) -> None:
+        """Disable Live / Disable / dropdown while voice test is running."""
+        self._test_voice_btn.configure(
+            state="normal",
+            text="Stop test" if testing else "Test voice",
+            fg_color="#ef4444" if testing else "#0ea5e9",
+            hover_color="#dc2626" if testing else "#0284c7",
+        )
+        self._live_btn.configure(state="disabled" if testing else "normal")
+        self._disable_voice_btn.configure(state="disabled" if testing else "normal")
+        try:
+            self._voice_dropdown.configure(state="disabled" if testing else "readonly")
+        except Exception:
+            pass
+
     def _refresh_voice_section(self) -> None:
         """Show collapsed vs expanded voice UI based on config.voice_enabled."""
         from . import config as _config
@@ -641,6 +779,8 @@ class SwapGUI(ctk.CTk):
         try:
             self._voice_dropdown.configure(state="disabled" if running else "readonly")
             self._disable_voice_btn.configure(state="disabled" if running else "normal")
+            # Disable Test voice during a full live session — both grab the mic.
+            self._test_voice_btn.configure(state="disabled" if running else "normal")
         except Exception:
             pass
 
