@@ -72,7 +72,10 @@ class VoiceTrack:
         if on_status is not None:
             self._on_status = on_status
         self._loop_ref = asyncio.get_running_loop()
-        self._chunk_q = asyncio.Queue(maxsize=10)
+        # Sized for ~5s of headroom at 100ms chunks. Big enough to absorb
+        # the OpenVoice warm-up extraction (~2-5s blocking) without losing
+        # context, small enough to bound steady-state latency.
+        self._chunk_q = asyncio.Queue(maxsize=50)
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
@@ -110,23 +113,34 @@ class VoiceTrack:
         chunk_q = self._chunk_q
         assert loop is not None and chunk_q is not None
 
+        def _put_on_loop(chunk: "np.ndarray") -> None:
+            """Runs on the asyncio loop — safe to drain the queue here.
+
+            If the GPU is falling behind (queue full), drop the oldest
+            chunks to keep latency bounded. A brief glitch is better than
+            ever-growing lag.
+            """
+            while chunk_q.full():
+                try:
+                    chunk_q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            try:
+                chunk_q.put_nowait(chunk)
+            except asyncio.QueueFull:
+                # Shouldn't happen after the drain above, but swallow just
+                # in case to keep the PortAudio callback chain healthy.
+                pass
+
         def _input_cb(indata, frames, time_info, status) -> None:  # type: ignore[no-untyped-def]
             if status:
                 print(f"[voice_track] input status: {status}", flush=True)
             # indata is shape (frames, channels). We capture mono.
             chunk = np.frombuffer(bytes(indata), dtype="float32").copy()
-            try:
-                # call_soon_threadsafe to bridge PortAudio thread → asyncio loop.
-                loop.call_soon_threadsafe(chunk_q.put_nowait, chunk)
-            except asyncio.QueueFull:
-                # Drop the oldest chunk if the GPU is falling behind.
-                # This bounds latency on slower hardware at the cost of a
-                # brief glitch — better than ever-growing lag.
-                try:
-                    _ = chunk_q.get_nowait()
-                    chunk_q.put_nowait(chunk)
-                except Exception:
-                    pass
+            # Hand off to the asyncio loop. Drop-oldest happens inside
+            # _put_on_loop, NOT in this PortAudio thread (asyncio.Queue
+            # methods aren't thread-safe).
+            loop.call_soon_threadsafe(_put_on_loop, chunk)
 
         in_stream = sd.RawInputStream(
             device=self.opts.microphone_device,
