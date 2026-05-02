@@ -53,6 +53,73 @@ WARM_UP_SECONDS = 3.0
 WARM_UP_TARGET_SAMPLES = int(SAMPLE_RATE * WARM_UP_SECONDS)
 
 
+def sola_blend(
+    converted: "np.ndarray",
+    sola_buffer: "np.ndarray | None",
+    ramp_in: "np.ndarray",
+    ramp_out: "np.ndarray",
+    crossfade: int = CROSSFADE_SAMPLES,
+    search: int = SOLA_SEARCH_SAMPLES,
+    hop: int = HOP_SAMPLES,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """One step of SOLA-aligned overlap-add streaming.
+
+    Pure function — no I/O, no async. Extracted so it can be unit-tested
+    against synthetic numpy arrays without needing torch / sounddevice /
+    a real GPU.
+
+    Args:
+        converted: model's converted audio for the current window.
+        sola_buffer: previous iteration's saved tail (ramp_out applied),
+            or None on the first call.
+        ramp_in: linear crossfade ramp 0→1, length `crossfade`.
+        ramp_out: linear crossfade ramp 1→0, length `crossfade`.
+        crossfade: blend region length in samples.
+        search: cross-correlation search range in samples.
+        hop: output samples per call.
+
+    Returns:
+        (output, next_sola_buffer) — output is `hop` samples ready to
+        write to the audio sink; next_sola_buffer is the tail to pass
+        back into this function on the next call.
+    """
+    import numpy as np
+
+    if sola_buffer is None:
+        # First window — no previous tail to align against. Emit the head.
+        output = converted[:hop].copy()
+    else:
+        # Cross-correlate new converted output's leading (crossfade + search)
+        # samples against the saved tail (ramp_out already applied).
+        search_region = converted[: crossfade + search]
+        cor_nom = np.convolve(search_region, np.flip(sola_buffer), "valid")
+        cor_den = np.sqrt(
+            np.convolve(
+                search_region**2,
+                np.ones(crossfade, dtype=np.float32),
+                "valid",
+            )
+            + 1e-3
+        )
+        sola_offset = int(np.argmax(cor_nom / cor_den))
+
+        # Output: hop samples starting at the optimal offset.
+        end = min(sola_offset + hop, len(converted))
+        output = converted[sola_offset:end].copy()
+        if len(output) < hop:
+            output = np.pad(output, (0, hop - len(output)))
+
+        # Apply ramp_in to the first `crossfade` samples of output, then
+        # add the saved (already ramp_out'd) tail.
+        output[:crossfade] *= ramp_in
+        output[:crossfade] += sola_buffer
+
+    # Save next iteration's tail: last `crossfade` samples of the converted
+    # window with ramp_out pre-applied.
+    next_buffer = converted[-crossfade:].copy() * ramp_out
+    return output, next_buffer
+
+
 @dataclass(frozen=True)
 class VoiceTrackOptions:
     voice: Voice
@@ -258,48 +325,8 @@ class VoiceTrack:
                     elif len(converted) > WINDOW_SAMPLES:
                         converted = converted[:WINDOW_SAMPLES]
 
-                    if sola_buffer is None:
-                        # First window — no previous tail to align against.
-                        # Emit the head directly.
-                        output = converted[:HOP_SAMPLES].copy()
-                    else:
-                        # SOLA: cross-correlate the new converted output's
-                        # leading (CROSSFADE + SEARCH) samples against the
-                        # saved tail (ramp_out already applied). Argmax of
-                        # the normalised correlation = best phase alignment.
-                        search_region = converted[
-                            : CROSSFADE_SAMPLES + SOLA_SEARCH_SAMPLES
-                        ]
-                        cor_nom = np.convolve(
-                            search_region, np.flip(sola_buffer), "valid"
-                        )
-                        cor_den = np.sqrt(
-                            np.convolve(
-                                search_region**2,
-                                np.ones(CROSSFADE_SAMPLES, dtype=np.float32),
-                                "valid",
-                            )
-                            + 1e-3
-                        )
-                        sola_offset = int(np.argmax(cor_nom / cor_den))
-
-                        # Output: HOP samples starting at the optimal offset.
-                        # Slice safely if offset+HOP exceeds converted length.
-                        end = min(sola_offset + HOP_SAMPLES, len(converted))
-                        output = converted[sola_offset:end].copy()
-                        if len(output) < HOP_SAMPLES:
-                            output = np.pad(output, (0, HOP_SAMPLES - len(output)))
-
-                        # Apply ramp_in to the first CROSSFADE_SAMPLES of
-                        # output, then add the saved (already ramp_out'd) tail.
-                        output[:CROSSFADE_SAMPLES] *= ramp_in
-                        output[:CROSSFADE_SAMPLES] += sola_buffer
-
-                    # Save next iteration's tail: last CROSSFADE_SAMPLES of
-                    # the converted window, with ramp_out pre-applied so the
-                    # next add is already weighted.
-                    sola_buffer = (
-                        converted[-CROSSFADE_SAMPLES:].copy() * ramp_out
+                    output, sola_buffer = sola_blend(
+                        converted, sola_buffer, ramp_in, ramp_out
                     )
 
                     if out_stream is not None:
