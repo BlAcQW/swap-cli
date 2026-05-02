@@ -182,13 +182,24 @@ class VoiceTrack:
                             warm_buffer[:WARM_UP_TARGET_SAMPLES], dtype=np.float32
                         )
                         warm_buffer = []
+                        print(
+                            "[voice_track] warm-up: extracting source SE "
+                            f"({WARM_UP_TARGET_SAMPLES} samples)…",
+                            flush=True,
+                        )
                         self._on_status("Voice: extracting source identity…")
                         try:
                             await asyncio.to_thread(
                                 self._converter.warm_up, warmup_audio, SAMPLE_RATE
                             )
+                            print(
+                                f"[voice_track] live · {self.opts.voice.name} "
+                                f"(out_device={self.opts.output_device})",
+                                flush=True,
+                            )
                             self._on_status(f"Voice: live ({self.opts.voice.name})")
                         except Exception as err:  # noqa: BLE001
+                            print(f"[voice_track] warm-up failed: {err}", flush=True)
                             self._on_status(f"Voice: warm-up failed ({err})")
                             print(f"[voice_track] warm-up failed: {err}", flush=True)
                             return
@@ -212,7 +223,9 @@ class VoiceTrack:
 
                 ticks += 1
                 if ticks % 50 == 0:  # every ~5 s
-                    self._on_status(f"Voice: live · {ticks // 10}s")
+                    secs = ticks // 10
+                    print(f"[voice_track] live · {secs}s", flush=True)
+                    self._on_status(f"Voice: live · {secs}s")
         except asyncio.CancelledError:
             raise
         finally:
