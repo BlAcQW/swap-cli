@@ -34,12 +34,15 @@ if TYPE_CHECKING:
 
 
 SAMPLE_RATE = 16_000
-# 500 ms windows. OpenVoice was trained on whole utterances, so smaller
-# chunks (100 ms etc.) produce audible clicks at every chunk boundary —
-# the HiFiGAN vocoder loses context between calls. 500 ms gives the model
-# enough runway to be coherent at the cost of ~500 ms of one-way latency,
-# which is still tolerable for a voice call.
-CHUNK_SAMPLES = 8_000
+# Mic delivers 250 ms blocks. We then BUFFER into 1 s windows with 50%
+# overlap and run the converter once per window. Output uses linear
+# crossfade between adjacent windows so words don't get cut mid-syllable
+# at chunk boundaries (the cause of "clean but garbled" output).
+#
+# Latency: ~1 s from speaking → being heard. Acceptable for a voice call.
+CHUNK_SAMPLES = 4_000  # 250 ms — sounddevice callback granularity
+WINDOW_SAMPLES = 16_000  # 1 s — converter input window
+HOP_SAMPLES = 8_000  # 500 ms — slide / output rate (50% overlap)
 WARM_UP_SECONDS = 3.0
 WARM_UP_TARGET_SAMPLES = int(SAMPLE_RATE * WARM_UP_SECONDS)
 
@@ -170,6 +173,17 @@ class VoiceTrack:
             out_stream.start()
 
         warm_buffer: list[float] = []
+        # Overlap-add streaming state. We accumulate input into a sliding
+        # WINDOW_SAMPLES window, run convert(), then crossfade the first
+        # HOP_SAMPLES of each new converted window with the saved tail of
+        # the previous window. Smooths phoneme boundaries that 500 ms
+        # non-overlapping chunks were chopping mid-syllable.
+        input_buf = np.zeros(0, dtype=np.float32)
+        prev_tail: np.ndarray | None = None  # last (WINDOW − HOP) samples
+        # Linear crossfade ramps. Hann would be marginally smoother but
+        # linear is shorter to read and good enough for speech.
+        ramp_in = np.linspace(0.0, 1.0, HOP_SAMPLES, dtype=np.float32)
+        ramp_out = 1.0 - ramp_in
         ticks = 0
 
         try:
@@ -206,31 +220,61 @@ class VoiceTrack:
                         except Exception as err:  # noqa: BLE001
                             print(f"[voice_track] warm-up failed: {err}", flush=True)
                             self._on_status(f"Voice: warm-up failed ({err})")
-                            print(f"[voice_track] warm-up failed: {err}", flush=True)
                             return
-                    converted = chunk
-                else:
+                    # Pass-through during warm-up so the user isn't muted.
+                    if out_stream is not None:
+                        try:
+                            out_stream.write(chunk.astype(np.float32).tobytes())
+                        except Exception:
+                            pass
+                    continue
+
+                # ── Overlap-add streaming inference ──────────────────────
+                input_buf = np.concatenate([input_buf, chunk])
+
+                while len(input_buf) >= WINDOW_SAMPLES:
+                    window = input_buf[:WINDOW_SAMPLES].copy()
+                    input_buf = input_buf[HOP_SAMPLES:]
+
                     try:
                         converted = await asyncio.to_thread(
-                            self._converter.convert, chunk, SAMPLE_RATE
+                            self._converter.convert, window, SAMPLE_RATE
                         )
                     except Exception as err:  # noqa: BLE001
-                        # Don't kill the session over a single chunk failure;
-                        # pass-through and keep going.
                         print(f"[voice_track] convert error: {err}", flush=True)
-                        converted = chunk
+                        converted = window  # pass-through on failure
 
-                if out_stream is not None:
-                    try:
-                        out_stream.write(converted.astype(np.float32).tobytes())
-                    except Exception as err:  # noqa: BLE001
-                        print(f"[voice_track] output write failed: {err}", flush=True)
+                    # Pad/truncate to expected window length so slicing is safe.
+                    if len(converted) < WINDOW_SAMPLES:
+                        converted = np.pad(
+                            converted, (0, WINDOW_SAMPLES - len(converted))
+                        )
+                    elif len(converted) > WINDOW_SAMPLES:
+                        converted = converted[:WINDOW_SAMPLES]
 
-                ticks += 1
-                if ticks % 50 == 0:  # every ~5 s
-                    secs = ticks // 10
-                    print(f"[voice_track] live · {secs}s", flush=True)
-                    self._on_status(f"Voice: live · {secs}s")
+                    head = converted[:HOP_SAMPLES]
+                    new_tail = converted[HOP_SAMPLES:].copy()
+
+                    if prev_tail is None:
+                        # First window — output the head directly, no blend.
+                        output = head
+                    else:
+                        # Crossfade: prev tail fading out, new head fading in.
+                        output = (prev_tail * ramp_out) + (head * ramp_in)
+
+                    prev_tail = new_tail
+
+                    if out_stream is not None:
+                        try:
+                            out_stream.write(output.astype(np.float32).tobytes())
+                        except Exception as err:  # noqa: BLE001
+                            print(f"[voice_track] output write failed: {err}", flush=True)
+
+                    ticks += 1
+                    if ticks % 10 == 0:  # one tick per HOP (~500 ms) → ~5 s
+                        secs = (ticks * HOP_SAMPLES) // SAMPLE_RATE
+                        print(f"[voice_track] live · {secs}s", flush=True)
+                        self._on_status(f"Voice: live · {secs}s")
         except asyncio.CancelledError:
             raise
         finally:
