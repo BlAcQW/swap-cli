@@ -68,10 +68,13 @@ VOICE_PACKAGES = (
     "librosa>=0.10",
     "soundfile>=0.12",
     "huggingface-hub>=0.20",
-    # OpenVoice's package __init__ pulls in text-normalization helpers
-    # even for pure tone-color conversion (English mic → English target).
-    # Install the small runtime ones; skip the heavy ML ones (faster-whisper,
-    # wavmark, whisper-timestamped, melo-tts) we don't use.
+    # OpenVoice's package __init__ eagerly imports its full runtime deps
+    # even for tone-color-only conversion. Install the lot here so future
+    # installs don't trickle errors one missing module at a time.
+    #
+    # We use NEWER versions than OpenVoice's pyproject.toml pins where:
+    #   - older pin has no Win/Py3.11 wheel (faster-whisper 0.9 → av==10)
+    #   - newer version is API-compatible enough for tone-color path
     "inflect>=7.0",
     "unidecode>=1.3",
     "eng-to-ipa>=0.0.2",
@@ -80,6 +83,9 @@ VOICE_PACKAGES = (
     "jieba>=0.42",
     "langid>=1.1",
     "pydub>=0.25",
+    "wavmark>=0.0.3",
+    "faster-whisper>=1.0",
+    "whisper-timestamped>=1.14",
 )
 
 
