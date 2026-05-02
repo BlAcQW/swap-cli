@@ -172,23 +172,30 @@ class VoiceConverter:
         Call this with at least ~2–3 seconds of speech before calling
         convert(). Without warm_up, convert() passes audio through unchanged.
         """
+        import os
         import tempfile
+        import time
 
         import numpy as np
         import soundfile as sf
 
         self.ensure_loaded()
 
-        # OpenVoice's extract_se reads from disk; cheapest path is a temp WAV.
-        # The whole op runs once per session (~2s on GPU, ~5s on CPU) so the
-        # disk hop is cheap.
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            sf.write(tmp.name, source_audio.astype(np.float32), sample_rate)
-            try:
-                se, _ = self._converter.extract_se(tmp.name, vad=True)
-                self._source_se = se.to(self._converter.device)
-            finally:
-                Path(tmp.name).unlink(missing_ok=True)
+        # OpenVoice's extract_se reads from disk; build a temp path that we
+        # do NOT keep an open file handle on. NamedTemporaryFile holds an
+        # exclusive write lock on Windows, which then blocks sf.write from
+        # opening the same path. Reserve a unique path the manual way.
+        tmp_path = (
+            Path(tempfile.gettempdir())
+            / f"swap-warmup-{os.getpid()}-{int(time.time() * 1000)}.wav"
+        )
+
+        try:
+            sf.write(str(tmp_path), source_audio.astype(np.float32), sample_rate)
+            se, _ = self._converter.extract_se(str(tmp_path), vad=True)
+            self._source_se = se.to(self._converter.device)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     def convert(self, audio_chunk: "np.ndarray", sample_rate: int) -> "np.ndarray":
         """Convert one mic chunk source→target. Pass-through until warmed up.
