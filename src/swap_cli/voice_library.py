@@ -92,6 +92,83 @@ def load_library_voices() -> list[Voice]:
     return voices
 
 
+# Human-friendly labels for OpenVoice's bundled base-speaker .pth files.
+# Map keyed by file stem (without .pth). Anything not in this dict gets a
+# fallback label so new speakers in future OpenVoice releases still appear.
+_OPENVOICE_SPEAKER_LABELS = {
+    "en-default": ("EN — Default", "OpenVoice English, neutral default speaker"),
+    "en-us": ("EN — American", "OpenVoice English, American accent"),
+    "en-br": ("EN — British", "OpenVoice English, British accent"),
+    "en-au": ("EN — Australian", "OpenVoice English, Australian accent"),
+    "en-india": ("EN — Indian", "OpenVoice English, Indian accent"),
+    "en-newest": ("EN — Newest", "OpenVoice English, newest training run"),
+    "es": ("ES — Spanish", "OpenVoice Spanish base speaker"),
+    "fr": ("FR — French", "OpenVoice French base speaker"),
+    "jp": ("JP — Japanese", "OpenVoice Japanese base speaker"),
+    "kr": ("KR — Korean", "OpenVoice Korean base speaker"),
+    "zh": ("ZH — Chinese", "OpenVoice Chinese base speaker"),
+}
+
+
+def load_openvoice_base_speakers() -> list[Voice]:
+    """Load the real OpenVoice base-speaker embeddings shipped with the V2
+    release (downloaded by `swap voices install` into the user data dir).
+
+    Returns [] if torch isn't installed or the weights aren't downloaded —
+    falls through to the placeholder bundled library + user voices.
+    """
+    voices: list[Voice] = []
+    try:
+        from .voice_prereq import openvoice_weights_dir
+    except Exception:  # noqa: BLE001
+        return voices
+
+    ses_dir = openvoice_weights_dir() / "base_speakers" / "ses"
+    if not ses_dir.exists():
+        return voices
+
+    try:
+        import torch
+    except ImportError:
+        return voices
+
+    for pth in sorted(ses_dir.glob("*.pth")):
+        stem = pth.stem
+        try:
+            tensor = torch.load(str(pth), map_location="cpu", weights_only=True)
+            embedding = tensor.detach().reshape(-1).cpu().tolist()
+        except Exception as err:  # noqa: BLE001
+            print(f"[voice_library] skipping {pth.name}: {err}", flush=True)
+            continue
+
+        if len(embedding) != 256:
+            print(
+                f"[voice_library] {pth.name} has unexpected dim "
+                f"{len(embedding)}, expected 256 — skipping",
+                flush=True,
+            )
+            continue
+
+        name, desc = _OPENVOICE_SPEAKER_LABELS.get(
+            stem,
+            (f"OpenVoice {stem}", f"OpenVoice base speaker '{stem}'"),
+        )
+
+        voices.append(
+            Voice(
+                id=f"openvoice-{stem}",
+                name=name,
+                description=desc,
+                source="library",
+                embedding=embedding,
+                sample_rate=16_000,
+                created_at=0,
+            )
+        )
+
+    return voices
+
+
 def load_user_voices() -> list[Voice]:
     """Return voices the user added via `swap voices add`."""
     voices: list[Voice] = []
@@ -109,8 +186,12 @@ def load_user_voices() -> list[Voice]:
 
 
 def load_all_voices() -> list[Voice]:
-    """Return library voices first, then user voices."""
-    return load_library_voices() + load_user_voices()
+    """Return voices in display priority order:
+      1. Real OpenVoice base speakers (downloaded by `swap voices install`)
+      2. Bundled placeholder library voices (Aria/Ben/etc. — pre-13b.3)
+      3. User-added custom voices
+    """
+    return load_openvoice_base_speakers() + load_library_voices() + load_user_voices()
 
 
 def find_voice(voice_id: str) -> Voice | None:

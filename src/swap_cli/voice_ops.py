@@ -43,11 +43,14 @@ class InstallResult:
     error: str | None = None
 
 
-# OpenVoice v2's tone-color converter checkpoint lives in MyShell's
-# HuggingFace repo. We only need the `converter/` subtree (~300 MB) — the
-# `base_speakers/` and `bert/` trees are TTS-specific and unused here.
+# OpenVoice v2 lives in MyShell's HuggingFace repo. We need:
+#   - converter/   the tone-color converter weights (~300 MB)
+#   - base_speakers/ses/*.pth   real speaker embeddings shipped with the
+#                               release (English/Spanish/French/etc.).
+#                               Tiny (~4 KB each) and gives users
+#                               actual-cloning library voices out of the box.
 OPENVOICE_HF_REPO = "myshell-ai/OpenVoiceV2"
-OPENVOICE_INCLUDE_PATTERNS = ["converter/*"]
+OPENVOICE_INCLUDE_PATTERNS = ["converter/*", "base_speakers/ses/*.pth"]
 
 
 # OpenVoice's setup.py pins librosa==0.9.1, numpy==1.22, av==10.* (av 10 has
