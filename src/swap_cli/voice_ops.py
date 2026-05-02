@@ -214,3 +214,42 @@ def remove_user_voice(name_or_id: str) -> bool:
         if v.name.lower() == name_or_id.lower() or v.id == name_or_id:
             return delete_user_voice(v.id)
     return False
+
+
+# ── Standalone voice session runner (shared by CLI + GUI) ─────────────────
+
+
+def find_voice_by_name_or_id(name_or_id: str) -> Voice | None:
+    """Resolve a voice by id, slug, or display name across library + user."""
+    from .voice_library import find_voice, load_all_voices
+
+    direct = find_voice(name_or_id)
+    if direct is not None:
+        return direct
+    needle = name_or_id.lower().strip()
+    for v in load_all_voices():
+        if v.name.lower() == needle or v.id.lower() == needle:
+            return v
+    return None
+
+
+def resolve_voice_devices(
+    mic: int | None = None,
+    output: int | None = None,
+) -> tuple[int, int | None]:
+    """Pick mic + virtual cable indices, falling back to auto-detect.
+
+    Returns (mic_index, output_index_or_None). Output is None when no
+    virtual audio cable is detected — voice still runs but is silent.
+    """
+    from . import voice_router
+
+    mic_idx = mic
+    if mic_idx is None:
+        picked = voice_router.pick_input_device(None)
+        mic_idx = int(picked["index"]) if picked else 0
+    out_idx = output
+    if out_idx is None:
+        picked = voice_router.pick_output_device(None)
+        out_idx = int(picked["index"]) if picked else None
+    return mic_idx, out_idx

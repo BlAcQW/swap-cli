@@ -976,11 +976,304 @@ class _EnableVoiceModal(ctk.CTkToplevel):
         self.destroy()
 
 
-def launch() -> None:
-    """Entrypoint used by `swap gui`."""
-    print("[gui] starting swap-cli GUI", flush=True)
+class VoiceOnlyGUI(ctk.CTk):
+    """Stripped single-purpose window — voice cloning only, no face/camera/Decart.
+
+    Launched via `swap gui --voice`. Reuses VoiceTrack, voice_library,
+    voice_router. License + Decart-key checks are skipped: voice runs
+    locally and we trust the swap-cli install itself.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title(f"swap voice {__version__}")
+        W, H = 460, 460
+        self.minsize(420, 420)
+        self.update_idletasks()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        self.geometry(f"{W}x{H}+{max(0, (sw - W) // 2)}+{max(0, (sh - H) // 2)}")
+        self.after(0, self._raise_to_front)
+
+        self._track = None  # voice_track.VoiceTrack | None
+        self._track_thread: threading.Thread | None = None
+        self._track_loop: asyncio.AbstractEventLoop | None = None
+        self._track_stop: Callable[[], None] | None = None
+        self._status_var = tk.StringVar(value="Idle.")
+
+        self._build_ui()
+        self._refresh_devices()
+
+    # ── UI build ──────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        outer = ctk.CTkFrame(self, fg_color="transparent")
+        outer.pack(fill="both", expand=True, padx=20, pady=18)
+
+        ctk.CTkLabel(
+            outer,
+            text="Voice clone · live",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(
+            outer,
+            text=(
+                "Local-only voice transformation for calls. No video, no "
+                "Decart, zero token cost."
+            ),
+            anchor="w",
+            justify="left",
+            text_color="#6b7280",
+            wraplength=400,
+        ).pack(fill="x", pady=(0, 14))
+
+        # ① Reference voice
+        ctk.CTkLabel(
+            outer, text="① Reference voice", anchor="w", font=ctk.CTkFont(size=11)
+        ).pack(anchor="w")
+        self._voice_var = tk.StringVar(value="(no voices found)")
+        self._voice_dropdown = ctk.CTkComboBox(
+            outer, values=[], variable=self._voice_var, state="readonly", height=32
+        )
+        self._voice_dropdown.pack(fill="x", pady=(2, 14))
+
+        # ② Microphone
+        ctk.CTkLabel(
+            outer, text="② Microphone", anchor="w", font=ctk.CTkFont(size=11)
+        ).pack(anchor="w")
+        self._mic_var = tk.StringVar(value="(no mic found)")
+        self._mic_dropdown = ctk.CTkComboBox(
+            outer, values=[], variable=self._mic_var, state="readonly", height=32
+        )
+        self._mic_dropdown.pack(fill="x", pady=(2, 14))
+
+        # ③ Output (virtual cable)
+        out_row = ctk.CTkFrame(outer, fg_color="transparent")
+        out_row.pack(fill="x")
+        out_row.columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            out_row, text="③ Output (virtual cable)", anchor="w", font=ctk.CTkFont(size=11)
+        ).grid(row=0, column=0, sticky="w", columnspan=2)
+        self._output_var = tk.StringVar(value="(no output found)")
+        self._output_dropdown = ctk.CTkComboBox(
+            out_row, values=[], variable=self._output_var, state="readonly", height=32
+        )
+        self._output_dropdown.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(
+            out_row, text="↻", width=42, height=32, command=self._refresh_devices
+        ).grid(row=1, column=1)
+
+        # Action row
+        actions = ctk.CTkFrame(outer, fg_color="transparent")
+        actions.pack(fill="x", pady=(20, 0))
+        actions.columnconfigure((0, 1), weight=1, uniform="act")
+
+        self._start_btn = ctk.CTkButton(
+            actions,
+            text="▶ Start",
+            command=self._on_start,
+            height=44,
+            corner_radius=8,
+            fg_color="#10b981",
+            hover_color="#059669",
+        )
+        self._start_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        self._stop_btn = ctk.CTkButton(
+            actions,
+            text="Stop",
+            command=self._on_stop,
+            height=44,
+            corner_radius=8,
+            fg_color="#374151",
+            hover_color="#4b5563",
+            state="disabled",
+        )
+        self._stop_btn.grid(row=0, column=1, sticky="ew")
+
+        # Status bar
+        status = ctk.CTkFrame(outer, fg_color="transparent")
+        status.pack(fill="x", pady=(18, 0))
+        ctk.CTkLabel(
+            status,
+            textvariable=self._status_var,
+            anchor="w",
+            text_color="#9ca3af",
+        ).pack(side="left", fill="x", expand=True)
+
+    # ── Device discovery ──────────────────────────────────────────────
+
+    def _refresh_devices(self) -> None:
+        from . import voice_library, voice_router
+
+        # Voices
+        voices = voice_library.load_all_voices()
+        if voices:
+            self._voice_label_to_id = {self._fmt_voice(v): v.id for v in voices}
+            labels = list(self._voice_label_to_id.keys())
+            self._voice_dropdown.configure(values=labels)
+            self._voice_var.set(labels[0])
+        else:
+            self._voice_dropdown.configure(values=["(no voices found)"])
+            self._voice_var.set("(no voices found)")
+
+        # Mics + outputs (require sounddevice)
+        inputs, outputs = voice_router.list_audio_devices()
+
+        if inputs:
+            self._mic_label_to_idx = {
+                f"{d['name']} (#{d['index']})": int(d["index"]) for d in inputs
+            }
+            self._mic_dropdown.configure(values=list(self._mic_label_to_idx.keys()))
+            self._mic_var.set(next(iter(self._mic_label_to_idx)))
+        else:
+            self._mic_dropdown.configure(values=["(no mic found)"])
+            self._mic_var.set("(no mic found)")
+
+        if outputs:
+            self._out_label_to_idx = {
+                f"{d['name']} (#{d['index']})": int(d["index"]) for d in outputs
+            }
+            self._output_dropdown.configure(values=list(self._out_label_to_idx.keys()))
+            # Prefer auto-detected virtual cable.
+            cable = voice_router.detect_virtual_cable_in_devices(outputs)
+            if cable is not None:
+                self._output_var.set(f"{cable['name']} (#{cable['index']})")
+            else:
+                self._output_var.set(next(iter(self._out_label_to_idx)))
+        else:
+            self._output_dropdown.configure(values=["(no output found)"])
+            self._output_var.set("(no output found)")
+
+    @staticmethod
+    def _fmt_voice(voice) -> str:  # type: ignore[no-untyped-def]
+        suffix = "library" if voice.is_library else "custom"
+        return f"{voice.name} — {voice.description}  [{suffix}]"
+
+    def _selected_voice_id(self) -> str | None:
+        return getattr(self, "_voice_label_to_id", {}).get(self._voice_var.get())
+
+    def _selected_mic(self) -> int | None:
+        return getattr(self, "_mic_label_to_idx", {}).get(self._mic_var.get())
+
+    def _selected_output(self) -> int | None:
+        return getattr(self, "_out_label_to_idx", {}).get(self._output_var.get())
+
+    # ── Start / stop ─────────────────────────────────────────────────
+
+    def _on_start(self) -> None:
+        if self._track_thread is not None and self._track_thread.is_alive():
+            self._status_var.set("Already running.")
+            return
+        voice_id = self._selected_voice_id()
+        mic = self._selected_mic()
+        output = self._selected_output()
+
+        if not voice_id:
+            self._status_var.set("Pick a voice first.")
+            return
+        if mic is None:
+            self._status_var.set("Pick a microphone first.")
+            return
+
+        from . import voice_library
+
+        target = voice_library.find_voice(voice_id)
+        if target is None:
+            self._status_var.set(f"Voice '{voice_id}' not found.")
+            return
+
+        def _emit(msg: str) -> None:
+            self.after(0, lambda m=msg: self._status_var.set(m))
+
+        async def _runner() -> None:
+            from .voice_track import VoiceTrack, VoiceTrackOptions
+
+            stop_evt = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            def _request_stop() -> None:
+                loop.call_soon_threadsafe(stop_evt.set)
+
+            self._track_stop = _request_stop
+
+            track = VoiceTrack(
+                VoiceTrackOptions(
+                    voice=target,
+                    microphone_device=mic,
+                    output_device=output,
+                )
+            )
+            track.start(on_status=_emit)
+            try:
+                await stop_evt.wait()
+            finally:
+                await track.stop()
+
+        def _worker() -> None:
+            print("[voice-gui] worker started", flush=True)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._track_loop = loop
+            try:
+                loop.run_until_complete(_runner())
+            except Exception as err:  # noqa: BLE001
+                import traceback
+
+                traceback.print_exc()
+                _emit(f"Failed: {err}")
+            finally:
+                print("[voice-gui] worker exiting", flush=True)
+                loop.close()
+                self._track_loop = None
+                self._track_stop = None
+                self.after(0, self._on_stopped)
+
+        self._set_running(True)
+        _emit(f"Starting ({target.name})…")
+        self._track_thread = threading.Thread(target=_worker, daemon=True)
+        self._track_thread.start()
+
+    def _on_stop(self) -> None:
+        if self._track_stop is not None:
+            try:
+                self._track_stop()
+            except Exception as err:  # noqa: BLE001
+                self._status_var.set(f"Stop failed: {err}")
+                return
+        self._stop_btn.configure(state="disabled", text="Stopping…")
+
+    def _on_stopped(self) -> None:
+        self._set_running(False)
+        self._track_thread = None
+        self._status_var.set("Stopped.")
+
+    def _set_running(self, running: bool) -> None:
+        self._start_btn.configure(state="disabled" if running else "normal")
+        self._stop_btn.configure(state="normal" if running else "disabled", text="Stop")
+        self._voice_dropdown.configure(state="disabled" if running else "readonly")
+        self._mic_dropdown.configure(state="disabled" if running else "readonly")
+        self._output_dropdown.configure(state="disabled" if running else "readonly")
+
+    def _raise_to_front(self) -> None:
+        try:
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(200, lambda: self.attributes("-topmost", False))
+            self.focus_force()
+        except Exception:
+            pass
+
+
+def launch(voice_only: bool = False) -> None:
+    """Entrypoint used by `swap gui`. With voice_only=True, opens a
+    stripped single-purpose window for live voice cloning only — no
+    face, no camera, no Decart connection.
+    """
+    print(f"[gui] starting swap-cli GUI (voice_only={voice_only})", flush=True)
     try:
-        app = SwapGUI()
+        app: ctk.CTk = VoiceOnlyGUI() if voice_only else SwapGUI()
     except Exception:
         import traceback
 

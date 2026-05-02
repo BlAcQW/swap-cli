@@ -42,7 +42,15 @@ def version() -> None:
 
 
 @app.command()
-def gui() -> None:
+def gui(
+    voice_only: Annotated[
+        bool,
+        typer.Option(
+            "--voice",
+            help="Open a stripped voice-only window (no face/camera/Decart).",
+        ),
+    ] = False,
+) -> None:
     """Launch the desktop GUI (recommended for non-developers)."""
     try:
         from .gui import launch
@@ -53,7 +61,7 @@ def gui() -> None:
             "[bold]pip install customtkinter[/bold]."
         )
         raise typer.Exit(1) from err
-    launch()
+    launch(voice_only=voice_only)
 
 
 @app.command()
@@ -229,6 +237,114 @@ def run(
         raise typer.Exit(1) from err
 
 
+@app.command()
+def voice(
+    voice: Annotated[
+        str,
+        typer.Option(
+            "--voice",
+            "-v",
+            help="Voice id or name (e.g. 'aria' or your custom voice).",
+        ),
+    ],
+    mic: Annotated[
+        int | None,
+        typer.Option(
+            "--mic",
+            help="Microphone device index. Default: system default mic.",
+        ),
+    ] = None,
+    output: Annotated[
+        int | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output device index. Default: auto-detected virtual cable.",
+        ),
+    ] = None,
+) -> None:
+    """Run voice cloning standalone for live calls. Press Ctrl+C to stop.
+
+    Voice runs entirely on your local GPU — no Decart connection, no
+    tokens spent. Open Zoom/Meet/Discord with the virtual cable as your
+    microphone (e.g. 'CABLE Output' / 'BlackHole 2ch') and speak — the
+    other side hears the cloned voice.
+    """
+    _run_voice_session(voice_name=voice, mic=mic, output=output, seconds=0)
+
+
+def _run_voice_session(
+    *,
+    voice_name: str,
+    mic: int | None,
+    output: int | None,
+    seconds: int,
+) -> None:
+    """Shared body for `swap voice` (forever) and `swap voices test` (timed)."""
+    import asyncio
+
+    from . import voice_ops, voice_router
+    from .voice_track import VoiceTrack, VoiceTrackOptions
+
+    target = voice_ops.find_voice_by_name_or_id(voice_name)
+    if target is None:
+        err_console.print(
+            f"[red]Voice '{voice_name}' not found.[/red] "
+            "Run [bold]swap voices list[/bold] to see available voices."
+        )
+        raise typer.Exit(1)
+
+    mic_idx, out_idx = voice_ops.resolve_voice_devices(mic, output)
+    cable_hint = voice_router.virtual_cable_hint()
+
+    if out_idx is None:
+        err_console.print(
+            f"[yellow]No virtual audio cable detected.[/yellow] Install "
+            f"[bold]{cable_hint.name}[/bold] so apps like Zoom/Meet can hear "
+            f"the cloned voice. Continuing — converted audio will be silent."
+        )
+
+    duration = "until Ctrl+C" if seconds <= 0 else f"{seconds}s"
+    console.print(
+        Panel.fit(
+            f"voice: [bold]{target.name}[/bold] ({target.source})\n"
+            f"mic device: {mic_idx}\n"
+            f"output device: {out_idx if out_idx is not None else '[dim]none — silent[/dim]'}\n"
+            f"duration: {duration}\n\n"
+            "[dim]Local GPU only. No Decart. Zero tokens spent.[/dim]",
+            title="▶ swap voice",
+            border_style="cyan",
+        )
+    )
+
+    async def _run() -> None:
+        track = VoiceTrack(
+            VoiceTrackOptions(
+                voice=target,
+                microphone_device=mic_idx,
+                output_device=out_idx,
+            )
+        )
+        track.start(on_status=lambda s: console.print(f"[dim]{s}[/dim]"))
+        try:
+            if seconds > 0:
+                await asyncio.sleep(seconds)
+            else:
+                while True:
+                    await asyncio.sleep(60)
+        finally:
+            await track.stop()
+
+    try:
+        asyncio.run(_run())
+        console.print("[green]✓ done.[/green]")
+    except KeyboardInterrupt:
+        console.print("\n[dim]interrupted.[/dim]")
+    except Exception as err:  # noqa: BLE001
+        err_console.print(f"[red]voice session failed: {err}[/red]")
+        raise typer.Exit(1) from err
+
+
 # ── voices ─────────────────────────────────────────────────────────────────
 
 
@@ -384,101 +500,15 @@ def voices_test(
     ] = 30,
     mic: Annotated[
         int | None,
-        typer.Option(
-            "--mic",
-            help="Microphone device index. Default: system default mic.",
-        ),
+        typer.Option("--mic", help="Microphone device index. Default: system default."),
     ] = None,
     output: Annotated[
         int | None,
-        typer.Option(
-            "--output",
-            help="Output device index. Default: auto-detected virtual cable.",
-        ),
+        typer.Option("--output", help="Output device index. Default: auto-detected virtual cable."),
     ] = None,
 ) -> None:
-    """Test voice cloning standalone — no Decart, no tokens spent.
-
-    Opens your mic, runs OpenVoice tone-color conversion against the
-    given voice, writes the converted audio to your virtual cable.
-    Lets you verify voice works without burning Decart credits on the
-    video pipeline.
-    """
-    import asyncio
-
-    from . import voice_library, voice_router
-    from .voice_track import VoiceTrack, VoiceTrackOptions
-
-    target = voice_library.find_voice(voice)
-    if target is None:
-        # Maybe they passed the display name.
-        for v in voice_library.load_all_voices():
-            if v.name.lower() == voice.lower():
-                target = v
-                break
-    if target is None:
-        err_console.print(
-            f"[red]Voice '{voice}' not found.[/red] "
-            "Run [bold]swap voices list[/bold] to see available voices."
-        )
-        raise typer.Exit(1)
-
-    # Resolve mic + output with the same auto-detection the GUI uses.
-    if mic is None:
-        picked = voice_router.pick_input_device(None)
-        mic = int(picked["index"]) if picked else 0
-    if output is None:
-        picked_out = voice_router.pick_output_device(None)
-        output = int(picked_out["index"]) if picked_out else None
-
-    cable_hint = voice_router.virtual_cable_hint()
-    if output is None:
-        err_console.print(
-            f"[yellow]No virtual audio cable detected.[/yellow] "
-            f"Install {cable_hint.name} so apps like Zoom/OBS can hear "
-            f"the cloned voice. Continuing anyway — converted audio "
-            f"will be silent."
-        )
-
-    console.print(
-        Panel.fit(
-            f"voice: [bold]{target.name}[/bold] ({target.source})\n"
-            f"mic device: {mic}\n"
-            f"output device: {output if output is not None else '[dim]none — silent[/dim]'}\n"
-            f"duration: {'until Ctrl+C' if seconds <= 0 else f'{seconds}s'}\n\n"
-            "[dim]No Decart connection. Zero tokens spent.[/dim]",
-            title="▶ swap voices test",
-            border_style="cyan",
-        )
-    )
-
-    async def _run() -> None:
-        track = VoiceTrack(
-            VoiceTrackOptions(
-                voice=target,
-                microphone_device=mic,
-                output_device=output,
-            )
-        )
-        track.start(on_status=lambda s: console.print(f"[dim]{s}[/dim]"))
-        try:
-            if seconds > 0:
-                await asyncio.sleep(seconds)
-            else:
-                # Sleep forever; KeyboardInterrupt breaks us out cleanly.
-                while True:
-                    await asyncio.sleep(60)
-        finally:
-            await track.stop()
-
-    try:
-        asyncio.run(_run())
-        console.print("[green]✓ test complete.[/green]")
-    except KeyboardInterrupt:
-        console.print("\n[dim]interrupted.[/dim]")
-    except Exception as err:  # noqa: BLE001
-        err_console.print(f"[red]test failed: {err}[/red]")
-        raise typer.Exit(1) from err
+    """Test voice cloning briefly (default 30s). Lighter sibling of `swap voice`."""
+    _run_voice_session(voice_name=voice, mic=mic, output=output, seconds=seconds)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
