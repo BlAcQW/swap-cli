@@ -378,15 +378,20 @@ def voices_install() -> None:
             raise typer.Exit(1)
         console.print("[green]✓ voice deps installed.[/green]")
 
+    # Always run snapshot_download — it's idempotent (skips files already
+    # present) and lets us pick up new patterns added to OPENVOICE_INCLUDE_
+    # PATTERNS in later releases (e.g. base_speakers/ses/*.pth landed
+    # after the initial converter/* download). HF Hub returns in <1s when
+    # everything's already local.
     if pre.weights.ok:
         console.print(
-            f"[green]✓ OpenVoice weights already present at "
-            f"{voice_prereq.openvoice_weights_dir()}.[/green]"
+            f"[dim]OpenVoice weights present at {voice_prereq.openvoice_weights_dir()}; "
+            "checking for additional files…[/dim]"
         )
     else:
         console.print("Downloading OpenVoice weights …")
-        target = voice_ops.download_openvoice_weights()
-        console.print(f"[green]✓ weights ready at {target}.[/green]")
+    target = voice_ops.download_openvoice_weights()
+    console.print(f"[green]✓ weights ready at {target}.[/green]")
 
     console.print(
         "\n[dim]Voice cloning ready. Open `swap gui`, click Enable, "
