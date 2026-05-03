@@ -635,6 +635,8 @@ class SwapGUI(ctk.CTk):
         def _emit(msg: str) -> None:
             self.after(0, lambda m=msg: self._status_var.set(m))
 
+        cfg_for_engine = config.load()
+
         async def _runner() -> None:
             from .voice_track import VoiceTrack, VoiceTrackOptions
 
@@ -643,6 +645,7 @@ class SwapGUI(ctk.CTk):
                     voice=target,
                     microphone_device=mic_idx,
                     output_device=out_idx,
+                    engine_name=cfg_for_engine.voice_engine,
                 )
             )
 
@@ -1187,6 +1190,10 @@ class VoiceOnlyGUI(ctk.CTk):
         def _emit(msg: str) -> None:
             self.after(0, lambda m=msg: self._status_var.set(m))
 
+        from . import config as _cfg_mod
+
+        cfg_for_engine = _cfg_mod.load()
+
         async def _runner() -> None:
             from .voice_track import VoiceTrack, VoiceTrackOptions
 
@@ -1203,6 +1210,7 @@ class VoiceOnlyGUI(ctk.CTk):
                     voice=target,
                     microphone_device=mic,
                     output_device=output,
+                    engine_name=cfg_for_engine.voice_engine,
                 )
             )
             track.start(on_status=_emit)

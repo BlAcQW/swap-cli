@@ -317,12 +317,15 @@ def _run_voice_session(
         )
     )
 
+    cfg = config.load()
+
     async def _run() -> None:
         track = VoiceTrack(
             VoiceTrackOptions(
                 voice=target,
                 microphone_device=mic_idx,
                 output_device=out_idx,
+                engine_name=cfg.voice_engine,
             )
         )
         track.start(on_status=lambda s: console.print(f"[dim]{s}[/dim]"))
@@ -483,6 +486,65 @@ def voices_remove(
             f"[red]No user voice named/id matching '{name}'.[/red]"
         )
         raise typer.Exit(1)
+
+
+@voices_app.command("engine")
+def voices_engine(
+    name: Annotated[
+        str | None,
+        typer.Argument(
+            help=(
+                "Engine to set as default for live streaming "
+                "(openvoice | rvc). Omit to print current setting + list."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Pick which engine handles live voice streaming.
+
+    OpenVoice (current default) is good for one-shot extraction but
+    streaming-limited (chunked output produces 'phoneme repeat' artifacts).
+    RVC (production streaming engine) lands in sprint 14b.2.b.
+    """
+    from . import config as _config
+    from . import voice_engines
+
+    cfg = _config.load()
+    if name is None:
+        # Show current + available engines.
+        table = Table(title="Voice engines", show_header=True, box=None)
+        table.add_column("name", style="dim")
+        table.add_column("display name")
+        table.add_column("available?")
+        table.add_column("active")
+        for engine_name in voice_engines.available_engines():
+            engine = voice_engines.get_engine(engine_name)
+            available = "[green]✓[/green]" if engine.is_available() else "[red]✗[/red]"
+            active = "[bold]●[/bold]" if engine_name == cfg.voice_engine else ""
+            table.add_row(engine.name, engine.display_name, available, active)
+        console.print(table)
+        return
+
+    if name not in voice_engines.available_engines():
+        err_console.print(
+            f"[red]Unknown engine '{name}'.[/red] "
+            f"Known: {voice_engines.available_engines()}"
+        )
+        raise typer.Exit(1)
+
+    engine = voice_engines.get_engine(name)
+    if not engine.is_available():
+        err_console.print(
+            f"[yellow]⚠ Engine '{name}' isn't installed/available.[/yellow] "
+            "Run [bold]swap voices install[/bold] first."
+        )
+        # Still save the preference — user may install later.
+
+    _config.update(voice_engine=name)
+    console.print(
+        f"[green]✓ Default voice engine set to[/green] [bold]{name}[/bold]"
+        f" ({engine.display_name})."
+    )
 
 
 @voices_app.command("test")

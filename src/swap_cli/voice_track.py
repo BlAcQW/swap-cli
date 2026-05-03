@@ -27,7 +27,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from .voice_library import Voice
-from .voice_model import VoiceConverter, voice_deps_present
+# voice_model imports removed — VoiceTrack now resolves its converter
+# via the voice_engines registry (sprint 14b.2.a).
 
 if TYPE_CHECKING:
     import numpy as np
@@ -126,6 +127,9 @@ class VoiceTrackOptions:
     microphone_device: int
     output_device: int | None  # None = drop converted audio (silent operation)
     play_through_speakers: bool = False
+    # Sprint 14b.2.a: which engine handles streaming inference. Defaults
+    # to OpenVoice (current path); RVC engine lands in 14b.2.b.
+    engine_name: str = "openvoice"
 
 
 class VoiceTrack:
@@ -137,12 +141,28 @@ class VoiceTrack:
     """
 
     def __init__(self, opts: VoiceTrackOptions) -> None:
-        if not voice_deps_present():
+        # Resolve the engine via the registry instead of importing voice_model
+        # directly. Sprint 14b.2.a refactor — keeps this file engine-agnostic
+        # so RVC drops in (14b.2.b) without further changes here.
+        from . import voice_engines
+
+        try:
+            engine = voice_engines.get_engine(opts.engine_name)
+        except KeyError as err:
             raise RuntimeError(
-                "Voice deps not installed. Run `swap voices install` first."
+                f"Unknown voice engine '{opts.engine_name}'. "
+                f"Known: {voice_engines.available_engines()}"
+            ) from err
+
+        if not engine.is_available():
+            raise RuntimeError(
+                f"Engine '{opts.engine_name}' isn't installed/available. "
+                "Run `swap voices install` first."
             )
+
         self.opts = opts
-        self._converter = VoiceConverter(target_embedding=opts.voice.embedding)
+        self._engine = engine
+        self._converter = engine.make_converter(target_embedding=opts.voice.embedding)
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._on_status: Callable[[str], None] = lambda _s: None

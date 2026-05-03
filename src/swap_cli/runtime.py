@@ -189,17 +189,20 @@ async def _maybe_start_voice(opts: RunOptions, notify: Callable[[str], None]) ->
     if not (opts.reference_voice and opts.microphone_device is not None):
         return None
     try:
+        from . import config as _config
         from . import voice_library, voice_track as voice_track_mod
 
         target = voice_library.find_voice(opts.reference_voice)
         if target is None:
             notify(f"Voice: '{opts.reference_voice}' not found in library.")
             return None
+        cfg = _config.load()
         track = voice_track_mod.VoiceTrack(
             voice_track_mod.VoiceTrackOptions(
                 voice=target,
                 microphone_device=opts.microphone_device,
                 output_device=opts.voice_output_device,
+                engine_name=cfg.voice_engine,
             )
         )
         track.start(on_status=notify)
