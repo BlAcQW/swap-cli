@@ -162,7 +162,7 @@ class VoiceTrack:
 
         self.opts = opts
         self._engine = engine
-        self._converter = engine.make_converter(target_embedding=opts.voice.embedding)
+        self._converter = engine.make_converter(target_voice=opts.voice)
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._on_status: Callable[[str], None] = lambda _s: None

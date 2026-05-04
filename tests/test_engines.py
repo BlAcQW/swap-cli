@@ -45,13 +45,12 @@ def test_get_engine_unknown_raises() -> None:
         voice_engines.get_engine("definitely-not-an-engine")
 
 
-def test_rvc_engine_methods_raise_not_implemented() -> None:
-    """RVCEngine methods make the stub status explicit."""
+def test_rvc_engine_extract_embedding_explains_path_only() -> None:
+    """RVCEngine.extract_embedding clearly explains RVC voices are .pth
+    files, not embeddings — and points at `swap voices add-rvc`."""
     engine = voice_engines.get_engine("rvc")
-    with pytest.raises(NotImplementedError, match="14b.2"):
+    with pytest.raises(RuntimeError, match="add-rvc"):
         engine.extract_embedding("/dev/null")
-    with pytest.raises(NotImplementedError, match="14b.2"):
-        engine.make_converter([0.0] * 256)
 
 
 def test_openvoice_engine_is_available_returns_bool() -> None:

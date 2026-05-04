@@ -55,10 +55,10 @@ class OpenVoiceEngine:
         return voice_model.extract_embedding(wav_path, device=device)
 
     def make_converter(
-        self, target_embedding: list[float], device: str | None = None
-    ):  # type: ignore[no-untyped-def]
+        self, target_voice, device: str | None = None  # type: ignore[no-untyped-def]
+    ):
         from .. import voice_model
 
         return voice_model.VoiceConverter(
-            target_embedding=target_embedding, device=device
+            target_embedding=target_voice.embedding, device=device
         )

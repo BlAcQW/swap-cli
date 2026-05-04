@@ -256,3 +256,114 @@ def resolve_voice_devices(
         picked = voice_router.pick_output_device(None)
         out_idx = int(picked["index"]) if picked else None
     return mic_idx, out_idx
+
+
+# ── RVC voice management (Sprint 14b.2.b) ──────────────────────────────────
+
+
+def add_rvc_voice(
+    pth_path: Path,
+    name: str | None = None,
+    index_path: Path | None = None,
+) -> Voice:
+    """Register an RVC voice model with swap-cli.
+
+    Copies the .pth (and optional .index) into the per-voice subdirectory
+    inside the RVC models dir, then writes a Voice record so the
+    GUI/CLI dropdown surfaces it. The .index file is a Faiss retrieval
+    index that improves quality — recommended but optional.
+
+    The Voice record uses:
+      - id: 'rvc-<slug>'  (the 'rvc-' prefix is how RVCEngine recognises
+        it during make_converter)
+      - source: 'library'  (shipped + user-added live in the same list)
+      - embedding: [] (RVC's voice identity is the .pth file, not a
+        speaker SE; the embedding field stays empty for RVC voices and
+        the engine reads voice.id to find the model)
+    """
+    from .voice_prereq import rvc_models_dir
+
+    if not pth_path.exists():
+        raise FileNotFoundError(f"RVC model not found: {pth_path}")
+    if not pth_path.suffix == ".pth":
+        raise ValueError(f"Expected .pth model file, got: {pth_path.suffix}")
+
+    display_name = name or pth_path.stem.replace("_", " ").replace("-", " ").strip()
+    voice_id = f"rvc-{slugify(display_name)}"
+
+    # Copy the .pth (and .index if given) into rvc_models_dir/<voice_id>/.
+    target_dir = rvc_models_dir() / voice_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_pth = target_dir / pth_path.name
+    if not target_pth.exists():
+        target_pth.write_bytes(pth_path.read_bytes())
+    if index_path is not None:
+        if not index_path.exists():
+            raise FileNotFoundError(f"Index file not found: {index_path}")
+        target_index = target_dir / index_path.name
+        if not target_index.exists():
+            target_index.write_bytes(index_path.read_bytes())
+
+    voice = Voice(
+        id=voice_id,
+        name=display_name,
+        description=f"RVC voice from {pth_path.name}",
+        source="library",
+        embedding=[],  # RVC uses the .pth file directly, not an SE vector
+        sample_rate=16_000,
+        created_at=int(time.time()),
+    )
+    save_user_voice(voice)
+    return voice
+
+
+def remove_rvc_voice(name_or_id: str) -> bool:
+    """Remove an RVC voice — both the JSON record and the model files."""
+    import shutil
+
+    from .voice_prereq import rvc_models_dir
+
+    target_id = (
+        name_or_id if name_or_id.startswith("rvc-") else f"rvc-{slugify(name_or_id)}"
+    )
+    voice_path = user_voices_dir() / f"{target_id}.json"
+    model_dir = rvc_models_dir() / target_id
+
+    removed_any = False
+    if voice_path.exists():
+        voice_path.unlink()
+        removed_any = True
+    if model_dir.exists():
+        shutil.rmtree(model_dir, ignore_errors=True)
+        removed_any = True
+    return removed_any
+
+
+def rvc_model_path_for(voice: Voice) -> Path | None:
+    """Return the .pth file for an RVC voice, or None if not found."""
+    from .voice_prereq import rvc_models_dir
+
+    if not voice.id.startswith("rvc-"):
+        return None
+    model_dir = rvc_models_dir() / voice.id
+    if not model_dir.exists():
+        return None
+    pth_files = list(model_dir.glob("*.pth"))
+    return pth_files[0] if pth_files else None
+
+
+def rvc_index_path_for(voice: Voice) -> Path | None:
+    """Return the .index file for an RVC voice, or None if not present.
+
+    The .index file enables retrieval-based feature mixing — improves
+    quality but is optional.
+    """
+    from .voice_prereq import rvc_models_dir
+
+    if not voice.id.startswith("rvc-"):
+        return None
+    model_dir = rvc_models_dir() / voice.id
+    if not model_dir.exists():
+        return None
+    index_files = list(model_dir.glob("*.index"))
+    return index_files[0] if index_files else None

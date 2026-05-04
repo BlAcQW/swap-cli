@@ -488,6 +488,61 @@ def voices_remove(
         raise typer.Exit(1)
 
 
+@voices_app.command("add-rvc")
+def voices_add_rvc(
+    pth: Annotated[Path, typer.Argument(help="Path to the RVC .pth model file.")],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Display name. Defaults to file stem."),
+    ] = None,
+    index: Annotated[
+        Path | None,
+        typer.Option(
+            "--index",
+            "-i",
+            help="Optional .index file (Faiss retrieval index — improves quality).",
+        ),
+    ] = None,
+) -> None:
+    """Register an RVC voice model. The .pth file is copied into swap-cli's
+    model directory; an optional .index file can be provided alongside.
+
+    After registering, switch to the RVC engine with `swap voices engine rvc`
+    and the voice appears in the GUI dropdown / `swap voice -v` list.
+    """
+    from . import voice_ops
+
+    try:
+        voice = voice_ops.add_rvc_voice(pth, name=name, index_path=index)
+    except (FileNotFoundError, ValueError) as err:
+        err_console.print(f"[red]{err}[/red]")
+        raise typer.Exit(1) from err
+
+    console.print(
+        f"[green]✓ Registered RVC voice[/green] [bold]{voice.name}[/bold] "
+        f"(id: {voice.id})"
+    )
+    console.print(
+        "[dim]Switch to RVC engine: [bold]swap voices engine rvc[/bold]\n"
+        "Then pick the voice in the GUI dropdown or `swap voice -v "
+        f"{voice.id}`.[/dim]"
+    )
+
+
+@voices_app.command("remove-rvc")
+def voices_remove_rvc(
+    name: Annotated[str, typer.Argument(help="RVC voice name or id.")],
+) -> None:
+    """Remove an RVC voice and its model files."""
+    from . import voice_ops
+
+    if voice_ops.remove_rvc_voice(name):
+        console.print(f"[green]✓ Removed RVC voice[/green] {name}.")
+    else:
+        err_console.print(f"[red]No RVC voice matching '{name}'.[/red]")
+        raise typer.Exit(1)
+
+
 @voices_app.command("engine")
 def voices_engine(
     name: Annotated[

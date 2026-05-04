@@ -50,6 +50,13 @@ voice = [
     # separately via `swap voices install` with --no-deps so its broken
     # transitive constraints don't poison the resolver. Tone-color
     # conversion only needs torch + numpy + librosa, which are above.
+
+    # Sprint 14b.2.b: RVC streaming engine. rvc-python is the cleanest
+    # Python wrapper for RVC inference. Its public API is batch-file
+    # only (infer_file: path → path); we wrap it with temp WAV files
+    # for streaming until we either reach into its internals or replace
+    # with a streaming-native fork.
+    "rvc-python>=0.2",
 ]
 
 [project.scripts]

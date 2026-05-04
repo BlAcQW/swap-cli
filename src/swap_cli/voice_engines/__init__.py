@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     import numpy as np
 
+    from ..voice_library import Voice
+
 
 @runtime_checkable
 class VoiceConverter(Protocol):
@@ -87,9 +89,15 @@ class VoiceEngine(Protocol):
         ...
 
     def make_converter(
-        self, target_embedding: list[float], device: str | None = None
+        self, target_voice: "Voice", device: str | None = None
     ) -> VoiceConverter:
-        """Build a stateful streaming converter for the given target voice."""
+        """Build a stateful streaming converter for the given target voice.
+
+        Engines may consult any field on the Voice — OpenVoice uses the
+        speaker embedding, RVC uses the voice id to find the .pth file
+        on disk. Pass the whole record so each engine can pick what it
+        needs.
+        """
         ...
 
 

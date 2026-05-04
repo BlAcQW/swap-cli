@@ -19,15 +19,21 @@ from platformdirs import user_data_dir
 
 APP_NAME = "swap-cli"
 OPENVOICE_WEIGHTS_DIRNAME = "openvoice-v2"
+RVC_MODELS_DIRNAME = "rvc"
 
 
 def models_dir() -> Path:
-    """Where OpenVoice weights live once `swap voices install` runs."""
+    """Where OpenVoice/RVC weights live once `swap voices install` runs."""
     return Path(user_data_dir(APP_NAME)) / "models"
 
 
 def openvoice_weights_dir() -> Path:
     return models_dir() / OPENVOICE_WEIGHTS_DIRNAME
+
+
+def rvc_models_dir() -> Path:
+    """Where RVC voice models (.pth + .index) live. Each subdir = one voice."""
+    return models_dir() / RVC_MODELS_DIRNAME
 
 
 @dataclass(frozen=True)
