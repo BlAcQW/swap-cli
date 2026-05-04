@@ -694,6 +694,13 @@ async def _doctor() -> None:
     table.add_row("opencv import", _import_ok("cv2"))
     table.add_row("av import", _import_ok("av"))
 
+    # macOS-only: customtkinter needs Tcl/Tk >= 8.6.9. The system Python
+    # ships 8.5.9 which fails silently or renders broken windows. Surface
+    # this here so users know to switch to python.org Python or
+    # `brew install python-tk@3.11`.
+    if sys.platform == "darwin":
+        table.add_row("tcl/tk version", _tcl_tk_label())
+
     console.print(table)
 
     failures = sum(
@@ -725,4 +732,29 @@ def _import_ok(name: str) -> str:
         __import__(name)
         return "[green]✓[/green]"
     except ImportError as err:
+        return f"[red]✗ {err}[/red]"
+
+
+def _tcl_tk_label() -> str:
+    """Return a doctor-row label for the Tcl/Tk version on macOS.
+
+    customtkinter requires >= 8.6.9; macOS system Python is stuck on
+    Apple's 8.5.9 (which has known Tk bugs). Direct users to
+    python.org Python or `brew install python-tk@3.11` when below the
+    floor.
+    """
+    try:
+        import tkinter
+
+        ver = tkinter.Tcl().call("info", "patchlevel")
+        parts = [int(p) for p in ver.split(".")[:3]]
+        while len(parts) < 3:
+            parts.append(0)
+        if tuple(parts) >= (8, 6, 9):
+            return f"[green]✓ {ver}[/green]"
+        return (
+            f"[red]✗ {ver} — need ≥ 8.6.9; "
+            "install python.org Python or `brew install python-tk@3.11`[/red]"
+        )
+    except Exception as err:  # noqa: BLE001
         return f"[red]✗ {err}[/red]"

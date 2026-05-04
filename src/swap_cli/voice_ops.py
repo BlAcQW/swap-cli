@@ -97,24 +97,65 @@ VOICE_PACKAGES = (
     # 'import openvoice' never trips on a missing module.
     "openai",
     "python-dotenv",
+    # rvc-python's runtime deps, modernized so they have wheels on
+    # Win/Linux/macOS-arm64. rvc-python itself is installed below
+    # with --no-deps because its pyproject pins fairseq==0.12.2 and
+    # numpy<=1.23.5 — both unresolvable on modern stacks.
+    "praat-parselmouth>=0.4.3",
+    "faiss-cpu>=1.8",      # rvc pins 1.7.3 — no arm64 wheel
+    "pyworld>=0.3.4",      # needs C compiler (Xcode CLT on Mac)
+    "torchcrepe>=0.0.20",
+    "omegaconf>=2.3",      # rvc pins 2.0.6 — conflicts with hydra-core
+    "ffmpeg-python>=0.2",
+    "loguru>=0.7",
 )
+
+# rvc-python on PyPI peaks at 0.1.5 and pins fairseq + numpy at
+# unresolvable versions. We install with --no-deps after seeding its
+# runtime deps in VOICE_PACKAGES above.
+RVC_PYTHON_SPEC = "rvc-python>=0.1.5"
+
+# fairseq 0.12.2 has no wheels on py3.11+, source build is broken
+# (omegaconf<2.1 + hydra-core resolver loop, dataclass mutable default
+# on py3.12). Install from the archived repo's main branch — it has
+# the py3.11 fixes that didn't make it into 0.12.2 on PyPI.
+FAIRSEQ_GIT_URL = "git+https://github.com/facebookresearch/fairseq.git"
 
 
 def install_voice_deps() -> bool:
     """Install voice deps without touching swap-cli itself.
 
-    Two pip calls:
+    Four pip calls:
       1. install VOICE_PACKAGES directly — modern resolved versions, no
          swap-cli reinstall (avoids the Windows swap.exe lock).
       2. install OpenVoice with --no-deps — keeps its broken transitive
          pins (faster-whisper → av==10.*, etc.) out of the resolver.
+      3. install rvc-python with --no-deps — its pinned fairseq/numpy
+         are unresolvable; runtime deps were seeded in step 1.
+      4. install fairseq from git with --no-deps — the PyPI 0.12.2 has
+         no wheels on py3.11+ and source build fails on the omegaconf
+         resolver loop; the archived repo's main has the fixes.
 
-    Returns True iff both steps succeed.
+    Returns True iff every step succeeds.
     """
+    # Mac pre-flight: OpenVoice install (`git+...`) and pyworld build
+    # both need git + a C compiler — both ship with Xcode CLT.
+    if sys.platform == "darwin":
+        import shutil
+
+        if shutil.which("git") is None:
+            raise RuntimeError(
+                "git not found. Install Xcode Command Line Tools first:\n"
+                "    xcode-select --install\n"
+                "Then re-run `swap voices install`."
+            )
+
     pip = [sys.executable, "-m", "pip", "install"]
     try:
         subprocess.check_call(pip + list(VOICE_PACKAGES))
         subprocess.check_call(pip + ["--no-deps", OPENVOICE_GIT_URL])
+        subprocess.check_call(pip + ["--no-deps", RVC_PYTHON_SPEC])
+        subprocess.check_call(pip + ["--no-deps", FAIRSEQ_GIT_URL])
         return True
     except subprocess.CalledProcessError:
         return False

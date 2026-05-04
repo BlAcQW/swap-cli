@@ -81,7 +81,22 @@ def _check_gpu() -> Check:
     """
     if sys.platform == "darwin":
         if platform.machine() == "arm64":
-            return Check(ok=True, label="Apple Silicon (MPS)")
+            # rvc-python doesn't reliably support MPS — PyTorch 2.6 + fairseq
+            # checkpoint loading + MPS is broken upstream
+            # (RVC-Project/Retrieval-based-Voice-Conversion-WebUI#767). The
+            # safe path on Apple Silicon today is CPU single-threaded, which
+            # is too slow for live RVC streaming on a typical M1/M2.
+            #
+            # OpenVoice tone-color extraction (used by `swap voices add`)
+            # runs fine on CPU in ~5 s — that path stays usable.
+            return Check(
+                ok=False,
+                label="Apple Silicon — CPU only",
+                hint=(
+                    "RVC live streaming may be too slow on M1/M2 CPUs. "
+                    "OpenVoice voice-add still works."
+                ),
+            )
         return Check(
             ok=False,
             label="Intel Mac",

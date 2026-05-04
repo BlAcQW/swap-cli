@@ -51,12 +51,14 @@ voice = [
     # transitive constraints don't poison the resolver. Tone-color
     # conversion only needs torch + numpy + librosa, which are above.
 
-    # Sprint 14b.2.b: RVC streaming engine. rvc-python is the cleanest
-    # Python wrapper for RVC inference. Its public API is batch-file
-    # only (infer_file: path → path); we wrap it with temp WAV files
-    # for streaming until we either reach into its internals or replace
-    # with a streaming-native fork.
-    "rvc-python>=0.2",
+    # NOTE: rvc-python is also NOT listed here, for the same reason as
+    # OpenVoice. rvc-python==0.1.5 (latest on PyPI) pins fairseq==0.12.2
+    # (no wheels on Python 3.11+, repo archived March 2026) and
+    # numpy<=1.23.5 (conflicts with our numpy>=1.26 base). Both kill
+    # the resolver. `swap voices install` installs rvc-python with
+    # --no-deps + a modern fairseq from git, after seeding the runtime
+    # deps it actually uses (faiss, pyworld, omegaconf, …) at modern
+    # versions that resolve. See voice_ops.install_voice_deps().
 ]
 
 [project.scripts]
