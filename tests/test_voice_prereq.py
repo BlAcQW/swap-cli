@@ -48,14 +48,27 @@ def test_intel_mac_blocked(monkeypatch) -> None:
 def test_check_deps_required_modules() -> None:
     """Sprint 14e: voice path is RVC-only. _check_deps must include the
     RVC runtime modules (rvc_python + fairseq) plus the base audio stack
-    (torch, torchaudio, sounddevice, librosa). Critically must NOT
-    include 'openvoice' anymore.
+    (torch, torchaudio, sounddevice, librosa). 14g.3 also requires
+    fairseq's runtime deps so partial installs are caught at install
+    time rather than mid-session. Critically must NOT include 'openvoice'.
     """
     from swap_cli import voice_prereq
     import inspect
 
     src = inspect.getsource(voice_prereq._check_deps)
-    for dep in ("torch", "torchaudio", "sounddevice", "librosa", "rvc_python", "fairseq"):
+    for dep in (
+        "torch",
+        "torchaudio",
+        "sounddevice",
+        "librosa",
+        "rvc_python",
+        "fairseq",
+        "hydra",
+        "bitarray",
+        "regex",
+        "sacrebleu",
+        "sklearn",
+    ):
         assert f'"{dep}"' in src, f"{dep} must be in the required tuple"
     assert '"openvoice"' not in src, "openvoice was removed in 14e"
 

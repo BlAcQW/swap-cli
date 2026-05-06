@@ -60,6 +60,33 @@ VOICE_PACKAGES = (
     "omegaconf>=2.3",
     "ffmpeg-python>=0.2",
     "loguru>=0.7",
+    # Sprint 14g.3: fairseq runtime deps (we install fairseq itself with
+    # --no-deps because of its archived omegaconf<2.1 / hydra-core<1.1
+    # pins; modern resolved versions of the same packages work fine for
+    # the basic OmegaConf.merge / hydra compose API fairseq uses).
+    "hydra-core>=1.3",
+    "bitarray>=2.0",
+    "regex>=2023.0",
+    "sacrebleu>=2.0",
+    "scikit-learn>=1.0",
+    "cffi>=1.15",
+    "Cython>=0.29",
+    "packaging>=21.0",
+)
+
+# Subset of VOICE_PACKAGES that fairseq specifically needs at runtime.
+# `swap voices repair` reinstalls these idempotently so users on older
+# installs don't have to re-run the full voice install.
+FAIRSEQ_RUNTIME_DEPS = (
+    "hydra-core>=1.3",
+    "bitarray>=2.0",
+    "regex>=2023.0",
+    "sacrebleu>=2.0",
+    "scikit-learn>=1.0",
+    "cffi>=1.15",
+    "Cython>=0.29",
+    "packaging>=21.0",
+    "omegaconf>=2.3",
 )
 
 # rvc-python on PyPI peaks at 0.1.5 and pins fairseq + numpy at
@@ -142,6 +169,21 @@ def _is_nvidia_platform() -> bool:
     if sys.platform == "darwin":
         return False
     return shutil.which("nvidia-smi") is not None
+
+
+def install_fairseq_runtime_deps() -> bool:
+    """Idempotently pip-install fairseq's actual runtime deps.
+
+    Used by `swap voices repair` to fix installs that ran before Sprint
+    14g.3 (when these packages weren't seeded). Pip skips already-
+    satisfied requirements, so re-running is cheap.
+    """
+    pip = [sys.executable, "-m", "pip", "install"]
+    try:
+        subprocess.check_call(pip + list(FAIRSEQ_RUNTIME_DEPS))
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
 
 def patch_fairseq_dataclass_defaults() -> bool:

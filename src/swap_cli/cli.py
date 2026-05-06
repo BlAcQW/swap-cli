@@ -528,28 +528,39 @@ def _download_catalog_entry(entry) -> None:  # type: ignore[no-untyped-def]
 def voices_repair() -> None:
     """Apply post-install patches for known dependency bugs.
 
-    Currently fixes one issue: fairseq's mutable dataclass defaults
-    that crash on Python 3.11+ (fairseq#5634, repo archived). Run this
-    if your voice session fails with:
+    Two fixes today:
+      1. Pip-install fairseq's runtime deps (hydra-core, bitarray, regex,
+         sacrebleu, scikit-learn, etc.) that pre-14g.3 installs missed
+         because we install fairseq itself with --no-deps. Idempotent.
+      2. Patch fairseq's mutable dataclass defaults (fairseq#5634; repo
+         archived; Python 3.11+ rejects them). Idempotent.
 
-        ValueError: mutable default <class 'fairseq.dataclass.configs.
-        CommonConfig'> for field common is not allowed: use default_factory
-
-    Idempotent — safe to run repeatedly.
+    Run this if your voice session fails with either:
+        ModuleNotFoundError: No module named 'hydra'  (or bitarray, etc.)
+        ValueError: mutable default ... for field common is not allowed
     """
     from . import voice_ops
 
-    if voice_ops.patch_fairseq_dataclass_defaults():
-        console.print(
-            "[green]✓ fairseq dataclass patch applied (or already in place).[/green]\n"
-            "[dim]Retry `swap gui --voice` or `swap voice -v <name>`.[/dim]"
-        )
-    else:
+    console.print("[bold]Step 1/2[/bold]: installing fairseq runtime deps …")
+    if not voice_ops.install_fairseq_runtime_deps():
         err_console.print(
-            "[red]Patch failed — see error above.[/red] "
-            "If fairseq isn't installed, run [bold]swap voices install[/bold] first."
+            "[red]pip install failed — see error above.[/red] "
+            "If you haven't run [bold]swap voices install[/bold] yet, do that first."
         )
         raise typer.Exit(1)
+    console.print("[green]✓ fairseq runtime deps in place.[/green]")
+
+    console.print("[bold]Step 2/2[/bold]: patching fairseq dataclass defaults …")
+    if not voice_ops.patch_fairseq_dataclass_defaults():
+        err_console.print(
+            "[red]Patch failed — see error above.[/red] "
+            "If fairseq isn't installed yet, run [bold]swap voices install[/bold] first."
+        )
+        raise typer.Exit(1)
+    console.print(
+        "[green]✓ fairseq dataclass patch applied (or already in place).[/green]\n"
+        "[dim]Retry `swap gui --voice` or `swap voice -v <name>`.[/dim]"
+    )
 
 
 @voices_app.command("list")

@@ -140,7 +140,15 @@ def _check_deps() -> Check:
         "sounddevice",
         "librosa",
         "rvc_python",
-        "fairseq",  # rvc-python imports fairseq for HuBERT loader
+        "fairseq",   # rvc-python imports fairseq for HuBERT loader
+        # Sprint 14g.3: fairseq's runtime deps (we install fairseq itself
+        # with --no-deps, so any of these missing means a half-install
+        # that crashes at session start).
+        "hydra",     # hydra-core
+        "bitarray",
+        "regex",
+        "sacrebleu",
+        "sklearn",   # scikit-learn import name
     )
     missing = [m for m in required if importlib.util.find_spec(m) is None]
     if not missing:
