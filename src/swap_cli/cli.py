@@ -960,6 +960,20 @@ async def _doctor() -> None:
     # it explicitly so they notice without running a session.
     table.add_row("torch CUDA", _torch_cuda_label())
 
+    # RVC base models — hubert_base.pt + rmvpe.pt. First session
+    # downloads these ~370 MB; until that finishes, the session waits.
+    # Surfacing them here tells users whether to expect a pause.
+    from . import voice_prereq
+
+    rvc_check = voice_prereq._check_rvc_base_models()
+    if rvc_check.ok:
+        table.add_row("rvc base models", f"[green]✓ {rvc_check.label}[/green]")
+    else:
+        table.add_row(
+            "rvc base models",
+            f"[yellow]⚠ {rvc_check.label} — {rvc_check.hint}[/yellow]",
+        )
+
     # macOS-only: customtkinter needs Tcl/Tk >= 8.6.9. The system Python
     # ships 8.5.9 which fails silently or renders broken windows. Surface
     # this here so users know to switch to python.org Python or

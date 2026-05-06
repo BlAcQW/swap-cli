@@ -48,6 +48,7 @@ class PrereqResult:
     ffmpeg: Check
     build_tools: Check
     audio_cable: Check
+    rvc_base_models: Check
 
     @property
     def all_ok(self) -> bool:
@@ -57,6 +58,7 @@ class PrereqResult:
             and self.ffmpeg.ok
             and self.build_tools.ok
             and self.audio_cable.ok
+            and self.rvc_base_models.ok
         )
 
     @property
@@ -72,6 +74,7 @@ def check_all() -> PrereqResult:
         ffmpeg=_check_ffmpeg(),
         build_tools=_check_build_tools(),
         audio_cable=_check_audio_cable(),
+        rvc_base_models=_check_rvc_base_models(),
     )
 
 
@@ -245,3 +248,35 @@ def _check_audio_cable() -> Check:
     # We can't reliably probe without importing pulse-bindings, so we treat
     # this as a soft-pass: the real gate is `swap voices install` time.
     return Check(ok=True, label="loopback available via pulseaudio")
+
+
+# ── RVC base models (hubert + rmvpe) ──────────────────────────────────────
+
+
+def _check_rvc_base_models() -> Check:
+    """rvc-python downloads `hubert_base.pt` (~190 MB) and `rmvpe.pt`
+    (~180 MB) on first run. If both aren't present, the first session
+    pauses for 30–90s while they download — surface this as a doctor
+    row so users don't think the session is hung.
+    """
+    rvc_dir = rvc_models_dir()
+    hubert = rvc_dir / "hubert_base.pt"
+    rmvpe = rvc_dir / "rmvpe.pt"
+    have_hubert = hubert.is_file() and hubert.stat().st_size > 50_000_000  # > 50 MB
+    have_rmvpe = rmvpe.is_file() and rmvpe.stat().st_size > 50_000_000
+
+    if have_hubert and have_rmvpe:
+        return Check(ok=True, label="hubert_base.pt + rmvpe.pt downloaded")
+    missing = []
+    if not have_hubert:
+        missing.append("hubert_base.pt")
+    if not have_rmvpe:
+        missing.append("rmvpe.pt")
+    return Check(
+        ok=False,
+        label=f"missing: {', '.join(missing)}",
+        hint=(
+            "First `swap gui --voice` session will download these (~370 MB total). "
+            "Wait for the rvc_python log to show 'Loading model...' before clicking Live."
+        ),
+    )

@@ -200,14 +200,48 @@ class VoiceTrack:
         import numpy as np
         import sounddevice as sd  # type: ignore[import-not-found]
 
+        # ── Diagnostic prints (Sprint 14h) ─────────────────────────────
+        # Every audio-pipeline boundary logs unconditionally so we can
+        # tell from the terminal where silence originates: mic, converter,
+        # or output.
+        try:
+            mic_info = sd.query_devices(self.opts.microphone_device, "input")
+            print(
+                f"[voice_track] mic device #{self.opts.microphone_device}: "
+                f"'{mic_info['name']}', native rate {int(mic_info['default_samplerate'])}Hz, "
+                f"max in channels {mic_info['max_input_channels']}",
+                flush=True,
+            )
+        except Exception as err:  # noqa: BLE001
+            print(f"[voice_track] mic device query failed: {err}", flush=True)
+        if self.opts.output_device is not None:
+            try:
+                out_info = sd.query_devices(self.opts.output_device, "output")
+                print(
+                    f"[voice_track] output device #{self.opts.output_device}: "
+                    f"'{out_info['name']}', native rate {int(out_info['default_samplerate'])}Hz, "
+                    f"max out channels {out_info['max_output_channels']}",
+                    flush=True,
+                )
+            except Exception as err:  # noqa: BLE001
+                print(f"[voice_track] output device query failed: {err}", flush=True)
+        else:
+            print(
+                "[voice_track] ⚠ NO OUTPUT DEVICE — converted audio will be dropped. "
+                "Install VB-Cable/BlackHole + restart, then pick it as Output in the GUI.",
+                flush=True,
+            )
+
         # Pre-load the model on the asyncio loop (a few seconds on cold cache).
         self._on_status("Voice: loading model…")
+        print("[voice_track] loading model (first run downloads ~370 MB) …", flush=True)
         try:
             await asyncio.to_thread(self._converter.ensure_loaded)
         except Exception as err:  # noqa: BLE001
             self._on_status(f"Voice: load failed ({err})")
             print(f"[voice_track] model load failed: {err}", flush=True)
             return
+        print("[voice_track] model loaded", flush=True)
 
         self._on_status("Voice: capturing… (warm-up ~2s)")
 
@@ -216,6 +250,9 @@ class VoiceTrack:
         loop = self._loop_ref
         chunk_q = self._chunk_q
         assert loop is not None and chunk_q is not None
+
+        # Counters used by the input callback for periodic RMS reporting.
+        in_chunk_count: list[int] = [0]
 
         def _put_on_loop(chunk: "np.ndarray") -> None:
             """Runs on the asyncio loop — safe to drain the queue here.
@@ -241,32 +278,67 @@ class VoiceTrack:
                 print(f"[voice_track] input status: {status}", flush=True)
             # indata is shape (frames, channels). We capture mono.
             chunk = np.frombuffer(bytes(indata), dtype="float32").copy()
+            in_chunk_count[0] += 1
+            # Log first chunk + every 40th (~10s @ 250ms) — proves mic is live.
+            n = in_chunk_count[0]
+            if n == 1 or n % 40 == 0:
+                rms = float(np.sqrt(np.mean(chunk**2)))
+                peak = float(np.max(np.abs(chunk))) if chunk.size > 0 else 0.0
+                tag = "FIRST" if n == 1 else f"#{n}"
+                print(
+                    f"[voice_track] mic chunk {tag}: {len(chunk)} samples, "
+                    f"RMS={rms:.4f}, peak={peak:.4f}"
+                    + ("  ⚠ SILENT — wrong mic device?" if rms < 1e-5 else ""),
+                    flush=True,
+                )
             # Hand off to the asyncio loop. Drop-oldest happens inside
             # _put_on_loop, NOT in this PortAudio thread (asyncio.Queue
             # methods aren't thread-safe).
             loop.call_soon_threadsafe(_put_on_loop, chunk)
 
-        in_stream = sd.RawInputStream(
-            device=self.opts.microphone_device,
-            channels=1,
-            samplerate=SAMPLE_RATE,
-            dtype="float32",
-            blocksize=CHUNK_SAMPLES,
-            callback=_input_cb,
-        )
-        out_stream = None
-        if self.opts.output_device is not None:
-            out_stream = sd.RawOutputStream(
-                device=self.opts.output_device,
+        try:
+            in_stream = sd.RawInputStream(
+                device=self.opts.microphone_device,
                 channels=1,
                 samplerate=SAMPLE_RATE,
                 dtype="float32",
                 blocksize=CHUNK_SAMPLES,
+                callback=_input_cb,
             )
+        except Exception as err:  # noqa: BLE001
+            print(
+                f"[voice_track] ✗ failed to open mic stream at {SAMPLE_RATE}Hz: {err}",
+                flush=True,
+            )
+            self._on_status(f"Voice: mic open failed ({err})")
+            return
+        out_stream = None
+        if self.opts.output_device is not None:
+            try:
+                out_stream = sd.RawOutputStream(
+                    device=self.opts.output_device,
+                    channels=1,
+                    samplerate=SAMPLE_RATE,
+                    dtype="float32",
+                    blocksize=CHUNK_SAMPLES,
+                )
+            except Exception as err:  # noqa: BLE001
+                print(
+                    f"[voice_track] ✗ failed to open output stream at {SAMPLE_RATE}Hz: {err}",
+                    flush=True,
+                )
+                self._on_status(f"Voice: output open failed ({err})")
+                # Continue without output — at least the conversion runs.
+                out_stream = None
 
         in_stream.start()
         if out_stream is not None:
             out_stream.start()
+        print(
+            f"[voice_track] streams started: mic 16kHz mono, "
+            f"output={'16kHz mono' if out_stream else 'NONE (silent)'}",
+            flush=True,
+        )
 
         warm_buffer: list[float] = []
         # SOLA streaming state. We accumulate input into a sliding
@@ -331,7 +403,11 @@ class VoiceTrack:
                 while len(input_buf) >= WINDOW_SAMPLES:
                     window = input_buf[:WINDOW_SAMPLES].copy()
                     input_buf = input_buf[HOP_SAMPLES:]
+                    win_rms = float(np.sqrt(np.mean(window**2)))
 
+                    import time as _time
+
+                    t0 = _time.perf_counter()
                     try:
                         converted = await asyncio.to_thread(
                             self._converter.convert, window, SAMPLE_RATE
@@ -339,6 +415,29 @@ class VoiceTrack:
                     except Exception as err:  # noqa: BLE001
                         print(f"[voice_track] convert error: {err}", flush=True)
                         converted = window  # pass-through on failure
+                    convert_ms = (_time.perf_counter() - t0) * 1000.0
+                    out_rms = (
+                        float(np.sqrt(np.mean(converted**2)))
+                        if converted.size > 0
+                        else 0.0
+                    )
+
+                    # First convert + every 10th: prove inference is producing audio.
+                    if ticks == 0 or (ticks + 1) % 10 == 0:
+                        flag = ""
+                        if win_rms > 1e-4 and out_rms < 1e-5:
+                            flag = "  ⚠ INPUT HAS AUDIO BUT CONVERTER RETURNED SILENCE"
+                        elif convert_ms > 1500:
+                            flag = (
+                                f"  ⚠ SLOW: {convert_ms:.0f}ms > 1000ms hop, "
+                                "queue will drop chunks"
+                            )
+                        tag = "FIRST" if ticks == 0 else f"#{ticks + 1}"
+                        print(
+                            f"[voice_track] convert {tag}: in_RMS={win_rms:.4f} → "
+                            f"out_RMS={out_rms:.4f} in {convert_ms:.0f}ms{flag}",
+                            flush=True,
+                        )
 
                     # Pad/truncate to expected window length so slicing is safe.
                     if len(converted) < WINDOW_SAMPLES:
@@ -352,11 +451,29 @@ class VoiceTrack:
                         converted, sola_buffer, ramp_in, ramp_out
                     )
 
+                    write_ok = False
+                    write_err: str | None = None
                     if out_stream is not None:
                         try:
                             out_stream.write(output.astype(np.float32).tobytes())
+                            write_ok = True
                         except Exception as err:  # noqa: BLE001
-                            print(f"[voice_track] output write failed: {err}", flush=True)
+                            write_err = str(err)
+                            print(
+                                f"[voice_track] output write failed: {err}",
+                                flush=True,
+                            )
+
+                    # First write + every 10th: confirms output device is being fed.
+                    if ticks == 0 or (ticks + 1) % 10 == 0:
+                        if out_stream is None:
+                            note = "no output device — converted audio dropped"
+                        elif write_ok:
+                            note = f"wrote {len(output)} samples"
+                        else:
+                            note = f"WRITE FAILED ({write_err})"
+                        tag = "FIRST" if ticks == 0 else f"#{ticks + 1}"
+                        print(f"[voice_track] output {tag}: {note}", flush=True)
 
                     ticks += 1
                     if ticks % 10 == 0:  # one tick per HOP (~500 ms) → ~5 s

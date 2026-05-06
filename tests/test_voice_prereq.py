@@ -103,13 +103,44 @@ def test_check_build_tools_skipped_off_windows(monkeypatch) -> None:
 
 def test_prereq_result_has_no_weights_field() -> None:
     """Sprint 14e: PrereqResult.weights field was removed alongside
-    OpenVoice. Replaced with ffmpeg + build_tools."""
+    OpenVoice. Replaced with ffmpeg + build_tools.
+    Sprint 14h: rvc_base_models field added.
+    """
     from swap_cli import voice_prereq
 
     fields = voice_prereq.PrereqResult.__dataclass_fields__
     assert "weights" not in fields
     assert "ffmpeg" in fields
     assert "build_tools" in fields
+    assert "rvc_base_models" in fields
+
+
+def test_check_rvc_base_models_missing_in_clean_env(tmp_path, monkeypatch) -> None:
+    """When rvc_models_dir is empty, the check fails with a hint about
+    the first-session download."""
+    from swap_cli import voice_prereq
+
+    monkeypatch.setattr(voice_prereq, "rvc_models_dir", lambda: tmp_path / "rvc")
+    check = voice_prereq._check_rvc_base_models()
+    assert check.ok is False
+    assert "hubert_base.pt" in check.label or "rmvpe.pt" in check.label
+    assert check.hint is not None
+    assert "download" in check.hint.lower()
+
+
+def test_check_rvc_base_models_present(tmp_path, monkeypatch) -> None:
+    """Both files present + > 50 MB each → green."""
+    from swap_cli import voice_prereq
+
+    rvc_dir = tmp_path / "rvc"
+    rvc_dir.mkdir()
+    # Synthesize ≥ 50 MB files cheaply via truncate.
+    (rvc_dir / "hubert_base.pt").write_bytes(b"\x00" * (51 * 1024 * 1024))
+    (rvc_dir / "rmvpe.pt").write_bytes(b"\x00" * (51 * 1024 * 1024))
+    monkeypatch.setattr(voice_prereq, "rvc_models_dir", lambda: rvc_dir)
+
+    check = voice_prereq._check_rvc_base_models()
+    assert check.ok is True
 
 
 def test_check_audio_cable_darwin_no_blackhole(monkeypatch, tmp_path) -> None:
