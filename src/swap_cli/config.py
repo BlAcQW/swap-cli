@@ -34,6 +34,10 @@ class Config:
     # Sprint 14e: voice path is RVC-only. Field kept for forward
     # compatibility (future engines: Applio, GPT-SoVITS).
     voice_engine: str = "rvc"
+    # Sprint 14i: when True, the streaming engine sets index_rate=0
+    # (skip Faiss retrieval). Trades timbre quality for big speedup —
+    # essential on weak GPUs or when using voices with huge .index files.
+    voice_fast: bool = False
 
     @property
     def is_complete(self) -> bool:
@@ -64,6 +68,7 @@ def load() -> Config:
         last_microphone=_int_or_none(data.get("last_microphone")),
         last_voice_output=_int_or_none(data.get("last_voice_output")),
         voice_engine=_clean(data.get("voice_engine")) or "rvc",
+        voice_fast=bool(data.get("voice_fast", False)),
     )
 
 
@@ -91,6 +96,8 @@ def save(cfg: Config) -> Path:
         body.append(f"last_voice_output = {cfg.last_voice_output}")
     if cfg.voice_engine and cfg.voice_engine != "rvc":
         body.append(f'voice_engine = "{_escape(cfg.voice_engine)}"')
+    if cfg.voice_fast:
+        body.append("voice_fast = true")
 
     text = "\n".join(body) + "\n"
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -116,6 +123,7 @@ def update(**kwargs: Any) -> Config:
         last_microphone=kwargs.get("last_microphone", current.last_microphone),
         last_voice_output=kwargs.get("last_voice_output", current.last_voice_output),
         voice_engine=kwargs.get("voice_engine", current.voice_engine),
+        voice_fast=kwargs.get("voice_fast", current.voice_fast),
     )
     save(merged)
     return merged

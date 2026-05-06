@@ -35,6 +35,11 @@ if TYPE_CHECKING:
 
 
 SAMPLE_RATE = 16_000
+# Sprint 14i: below this RMS, skip the converter entirely and emit
+# zeros. Mirrors w-okada's silentThreshold. Catches breaths, ambient
+# noise, keyboard taps — saves 1-2.4 s of inference cost per silent
+# chunk on a 4060 mobile.
+SILENT_THRESHOLD_RMS = 0.01
 # Mic delivers 250 ms blocks. We then BUFFER into 2 s windows and emit
 # 1 s hops. Per the upstream RVC realtime guide:
 #   "Sample length 0.5–1.0s. Lower = less latency but worse quality and
@@ -133,6 +138,11 @@ class VoiceTrackOptions:
     # Sprint 14b.2.a: which engine handles streaming inference. Defaults
     # to OpenVoice (current path); RVC engine lands in 14b.2.b.
     engine_name: str = "rvc"
+    # Sprint 14i: when True, set RVC index_rate=0 — disables Faiss
+    # retrieval. Massive speedup on big-index voices (calm-man's 607MB
+    # index dominates inference time). Slight quality loss; preferred
+    # over chunk drops on weaker GPUs.
+    fast: bool = False
 
 
 class VoiceTrack:
@@ -242,6 +252,18 @@ class VoiceTrack:
             print(f"[voice_track] model load failed: {err}", flush=True)
             return
         print("[voice_track] model loaded", flush=True)
+
+        # Sprint 14i: apply fast mode (skip Faiss retrieval) if requested.
+        if self.opts.fast and hasattr(self._converter, "set_index_rate"):
+            try:
+                self._converter.set_index_rate(0.0)
+                print(
+                    "[voice_track] FAST mode: index_rate=0 (no Faiss retrieval — "
+                    "faster but less accurate timbre)",
+                    flush=True,
+                )
+            except Exception as err:  # noqa: BLE001
+                print(f"[voice_track] failed to enable fast mode: {err}", flush=True)
 
         self._on_status("Voice: capturing… (warm-up ~2s)")
 
@@ -408,13 +430,19 @@ class VoiceTrack:
                     import time as _time
 
                     t0 = _time.perf_counter()
-                    try:
-                        converted = await asyncio.to_thread(
-                            self._converter.convert, window, SAMPLE_RATE
-                        )
-                    except Exception as err:  # noqa: BLE001
-                        print(f"[voice_track] convert error: {err}", flush=True)
-                        converted = window  # pass-through on failure
+                    if win_rms < SILENT_THRESHOLD_RMS:
+                        # Silent gate (Sprint 14i, w-okada-inspired). Skip
+                        # the model entirely — no point running Hubert +
+                        # F0 + retrieval on ambient noise. Emit zeros.
+                        converted = np.zeros(WINDOW_SAMPLES, dtype=np.float32)
+                    else:
+                        try:
+                            converted = await asyncio.to_thread(
+                                self._converter.convert, window, SAMPLE_RATE
+                            )
+                        except Exception as err:  # noqa: BLE001
+                            print(f"[voice_track] convert error: {err}", flush=True)
+                            converted = window  # pass-through on failure
                     convert_ms = (_time.perf_counter() - t0) * 1000.0
                     out_rms = (
                         float(np.sqrt(np.mean(converted**2)))

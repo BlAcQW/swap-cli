@@ -111,8 +111,34 @@ def pick_output_device(preferred_index: int | None = None) -> dict | None:
     return detect_virtual_cable_in_devices(outputs)
 
 
+# Windows ships compatibility shim devices that DO NOT actually capture
+# audio (Sprint 14h evidence: 'Microsoft Sound Mapper - Input' returned
+# RMS=0.0 across every chunk). Skip them when auto-picking — users can
+# still select them manually if they really want to.
+_INPUT_SHIM_NEEDLES = (
+    "sound mapper",
+    "primary sound",
+    "stereo mix",
+    "what u hear",
+)
+
+
+def is_shim_input_device(name: str) -> bool:
+    """True if the device name matches a known no-op compatibility shim."""
+    n = name.lower()
+    return any(needle in n for needle in _INPUT_SHIM_NEEDLES)
+
+
 def pick_input_device(preferred_index: int | None = None) -> dict | None:
-    """Pick the user's default microphone (preferred index → first input)."""
+    """Pick the user's default microphone.
+
+    Order of preference:
+      1. preferred_index — even if it's a shim, the user explicitly asked for it.
+      2. First non-shim input device (skips Microsoft Sound Mapper, Primary Sound,
+         Stereo Mix, etc. — these route to silence on modern Windows).
+      3. First input device of any kind, as a last resort (better something
+         than nothing).
+    """
     inputs, _outputs = list_audio_devices()
     if not inputs:
         return None
@@ -120,4 +146,8 @@ def pick_input_device(preferred_index: int | None = None) -> dict | None:
         for dev in inputs:
             if dev.get("index") == preferred_index:
                 return dev
+
+    real_inputs = [d for d in inputs if not is_shim_input_device(str(d.get("name", "")))]
+    if real_inputs:
+        return real_inputs[0]
     return inputs[0]

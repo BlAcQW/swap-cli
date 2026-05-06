@@ -646,6 +646,7 @@ class SwapGUI(ctk.CTk):
                     microphone_device=mic_idx,
                     output_device=out_idx,
                     engine_name=cfg_for_engine.voice_engine,
+                    fast=cfg_for_engine.voice_fast,
                 )
             )
 
@@ -1210,6 +1211,7 @@ class VoiceOnlyGUI(ctk.CTk):
                     microphone_device=mic,
                     output_device=output,
                     engine_name=cfg_for_engine.voice_engine,
+                    fast=cfg_for_engine.voice_fast,
                 )
             )
             track.start(on_status=_emit)

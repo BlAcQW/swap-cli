@@ -348,6 +348,7 @@ def _run_voice_session(
                 microphone_device=mic_idx,
                 output_device=out_idx,
                 engine_name=cfg.voice_engine,
+                fast=cfg.voice_fast,
             )
         )
         track.start(on_status=lambda s: console.print(f"[dim]{s}[/dim]"))
@@ -522,6 +523,96 @@ def _download_catalog_entry(entry) -> None:  # type: ignore[no-untyped-def]
         f"[green]✓ Voice ready:[/green] [bold]{voice.name}[/bold] (id: {voice.id})\n"
         "[dim]Try it with `swap gui --voice`.[/dim]"
     )
+
+
+@voices_app.command("devices")
+def voices_devices() -> None:
+    """List audio devices with hints — pick mic + output by index."""
+    from . import voice_router
+
+    inputs, outputs = voice_router.list_audio_devices()
+
+    table = Table(title="Audio inputs (microphones)", show_header=True, box=None)
+    table.add_column("idx", style="dim", justify="right")
+    table.add_column("name")
+    table.add_column("rate", justify="right")
+    table.add_column("ch", justify="right")
+    table.add_column("hint")
+    for dev in inputs:
+        idx = dev.get("index")
+        name = str(dev.get("name", "?"))
+        rate = int(dev.get("default_samplerate", 0))
+        ch = int(dev.get("max_input_channels", 0))
+        if voice_router.is_shim_input_device(name):
+            hint = "[red]✗ skip — Windows shim, returns silence[/red]"
+        else:
+            hint = "[green]✓ real mic[/green]"
+        table.add_row(str(idx), name, f"{rate}Hz", str(ch), hint)
+    console.print(table)
+
+    table = Table(title="Audio outputs", show_header=True, box=None)
+    table.add_column("idx", style="dim", justify="right")
+    table.add_column("name")
+    table.add_column("rate", justify="right")
+    table.add_column("ch", justify="right")
+    table.add_column("hint")
+    cable = voice_router.detect_virtual_cable_in_devices(outputs)
+    cable_idx = cable.get("index") if cable else None
+    for dev in outputs:
+        idx = dev.get("index")
+        name = str(dev.get("name", "?"))
+        rate = int(dev.get("default_samplerate", 0))
+        ch = int(dev.get("max_output_channels", 0))
+        if idx == cable_idx:
+            hint = "[bold yellow]★ virtual cable — pick this for swap output[/bold yellow]"
+        else:
+            hint = "[dim]speakers / headphones[/dim]"
+        table.add_row(str(idx), name, f"{rate}Hz", str(ch), hint)
+    console.print(table)
+
+
+@voices_app.command("fast")
+def voices_fast(
+    state: Annotated[
+        str | None,
+        typer.Argument(
+            help="'on' or 'off'. Omit to print current setting.",
+        ),
+    ] = None,
+) -> None:
+    """Toggle Fast mode for voice streaming.
+
+    Fast mode skips RVC's Faiss retrieval (sets index_rate=0). On voices
+    with large .index files (e.g. calm-man's 607 MB), this is the
+    difference between real-time and falling behind. Quality loss is
+    real but acceptable for "make it work" — try Fast first, then turn
+    it off if your hardware can keep up.
+    """
+    from . import config as _config
+
+    cfg = _config.load()
+    if state is None:
+        cur = "on" if cfg.voice_fast else "off"
+        console.print(f"voice fast mode: [bold]{cur}[/bold]")
+        return
+
+    norm = state.strip().lower()
+    if norm in ("on", "true", "1", "yes", "y"):
+        _config.update(voice_fast=True)
+        console.print(
+            "[green]✓ Fast mode ON[/green] — index_rate=0, "
+            "Faiss retrieval skipped."
+        )
+    elif norm in ("off", "false", "0", "no", "n"):
+        _config.update(voice_fast=False)
+        console.print(
+            "[green]✓ Fast mode OFF[/green] — index_rate at default, full quality."
+        )
+    else:
+        err_console.print(
+            f"[red]Unknown state '{state}'.[/red] Use 'on' or 'off'."
+        )
+        raise typer.Exit(1)
 
 
 @voices_app.command("repair")
