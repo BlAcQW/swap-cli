@@ -169,18 +169,49 @@ def patch_fairseq_dataclass_defaults() -> bool:
     Returns True if the patch was applied, was already applied, or
     fairseq isn't installed (nothing to do).
     """
-    import importlib.util
     import re
+    import site
+    import sysconfig
 
-    try:
-        spec = importlib.util.find_spec("fairseq.dataclass.configs")
-    except (ModuleNotFoundError, ImportError):
-        # fairseq parent package not installed; nothing to patch.
-        return True
-    if spec is None or spec.origin is None:
+    # CRITICAL: do NOT use importlib.find_spec("fairseq.*") here. find_spec
+    # imports the parent fairseq package, whose __init__.py transitively
+    # imports the very broken file we're trying to patch — meaning find_spec
+    # crashes with the same ValueError before it can return. Locate
+    # configs.py purely by filesystem walk instead.
+    raw_paths: list[str] = []
+    paths = sysconfig.get_paths()
+    for key in ("purelib", "platlib"):
+        if paths.get(key):
+            raw_paths.append(paths[key])
+    if hasattr(site, "getsitepackages"):
+        try:
+            raw_paths.extend(site.getsitepackages())
+        except (AttributeError, TypeError):
+            pass
+    if hasattr(site, "getusersitepackages"):
+        try:
+            user_sp = site.getusersitepackages()
+            if user_sp:
+                raw_paths.append(user_sp)
+        except (AttributeError, TypeError):
+            pass
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for raw in raw_paths:
+        sp = Path(raw)
+        if sp in seen:
+            continue
+        seen.add(sp)
+        configs_py = sp / "fairseq" / "dataclass" / "configs.py"
+        if configs_py.is_file():
+            candidates.append(configs_py)
+
+    if not candidates:
+        # fairseq isn't installed in any reachable site-packages.
         return True
 
-    configs_path = Path(spec.origin)
+    configs_path = candidates[0]
     try:
         src = configs_path.read_text(encoding="utf-8")
     except OSError as err:

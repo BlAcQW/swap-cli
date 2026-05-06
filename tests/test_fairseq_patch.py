@@ -40,10 +40,15 @@ class FairseqConfig:
 """
 
 
-def _install_fake_fairseq(tmp_path) -> Path:
+def _install_fake_fairseq(tmp_path, monkeypatch) -> Path:
     """Create a minimal `fairseq.dataclass.configs` package on disk and
-    register it on sys.path so importlib.find_spec can locate it.
-    Returns the configs.py path."""
+    redirect site.getsitepackages + sysconfig.get_paths to point at our
+    temp dir, so the patch finds it without importing fairseq.
+
+    We avoid sys.path tricks because the production code is intentionally
+    NOT using importlib.find_spec (which would import the broken parent
+    package). Returns the configs.py path.
+    """
     pkg_root = tmp_path / "fake_site"
     fairseq_pkg = pkg_root / "fairseq"
     dataclass_pkg = fairseq_pkg / "dataclass"
@@ -52,66 +57,61 @@ def _install_fake_fairseq(tmp_path) -> Path:
     (dataclass_pkg / "__init__.py").write_text("")
     configs_py = dataclass_pkg / "configs.py"
     configs_py.write_text(BROKEN_SAMPLE)
-    sys.path.insert(0, str(pkg_root))
-    # Bust the import cache so find_spec sees the new package.
-    importlib.invalidate_caches()
+
+    import site
+    import sysconfig
+
+    monkeypatch.setattr(site, "getsitepackages", lambda: [str(pkg_root)])
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(pkg_root))
+    monkeypatch.setattr(
+        sysconfig, "get_paths", lambda *a, **kw: {"purelib": str(pkg_root), "platlib": str(pkg_root)}
+    )
     return configs_py
 
 
-def _uninstall_fake_fairseq(pkg_root: Path) -> None:
-    sys.path.remove(str(pkg_root))
-    for mod in [m for m in sys.modules if m.startswith("fairseq")]:
-        del sys.modules[mod]
-
-
-def test_patch_rewrites_mutable_defaults(tmp_path) -> None:
-    configs_py = _install_fake_fairseq(tmp_path)
-    pkg_root = tmp_path / "fake_site"
-    try:
-        from swap_cli import voice_ops
-
-        result = voice_ops.patch_fairseq_dataclass_defaults()
-        assert result is True
-
-        patched = configs_py.read_text()
-        # Mutable defaults should be gone.
-        assert "= CommonConfig()" not in patched
-        assert "= CommonEvalConfig()" not in patched
-        # Replaced with default_factory.
-        assert "field(default_factory=CommonConfig)" in patched
-        assert "field(default_factory=CommonEvalConfig)" in patched
-        # Unrelated lines must be untouched.
-        assert 'name: str = "x"' in patched
-    finally:
-        _uninstall_fake_fairseq(pkg_root)
-
-
-def test_patch_is_idempotent(tmp_path) -> None:
-    """Running the patch twice doesn't double-wrap or corrupt the file."""
-    configs_py = _install_fake_fairseq(tmp_path)
-    pkg_root = tmp_path / "fake_site"
-    try:
-        from swap_cli import voice_ops
-
-        assert voice_ops.patch_fairseq_dataclass_defaults() is True
-        first = configs_py.read_text()
-        assert voice_ops.patch_fairseq_dataclass_defaults() is True
-        second = configs_py.read_text()
-        assert first == second
-    finally:
-        _uninstall_fake_fairseq(pkg_root)
-
-
-def test_patch_no_op_when_fairseq_absent() -> None:
-    """If fairseq isn't installed, the patch returns True (nothing to do)."""
+def test_patch_rewrites_mutable_defaults(tmp_path, monkeypatch) -> None:
+    configs_py = _install_fake_fairseq(tmp_path, monkeypatch)
     from swap_cli import voice_ops
 
-    # Ensure no fake fairseq is shadowing.
-    for mod in [m for m in sys.modules if m.startswith("fairseq")]:
-        del sys.modules[mod]
+    result = voice_ops.patch_fairseq_dataclass_defaults()
+    assert result is True
 
-    # In CI fairseq genuinely isn't installed, so this exercises the
-    # "spec is None" early return.
+    patched = configs_py.read_text()
+    assert "= CommonConfig()" not in patched
+    assert "= CommonEvalConfig()" not in patched
+    assert "field(default_factory=CommonConfig)" in patched
+    assert "field(default_factory=CommonEvalConfig)" in patched
+    # Unrelated lines must be untouched.
+    assert 'name: str = "x"' in patched
+
+
+def test_patch_is_idempotent(tmp_path, monkeypatch) -> None:
+    """Running the patch twice doesn't double-wrap or corrupt the file."""
+    configs_py = _install_fake_fairseq(tmp_path, monkeypatch)
+    from swap_cli import voice_ops
+
+    assert voice_ops.patch_fairseq_dataclass_defaults() is True
+    first = configs_py.read_text()
+    assert voice_ops.patch_fairseq_dataclass_defaults() is True
+    second = configs_py.read_text()
+    assert first == second
+
+
+def test_patch_no_op_when_fairseq_absent(tmp_path, monkeypatch) -> None:
+    """If fairseq isn't found in any reachable site-packages, return True."""
+    import site
+    import sysconfig
+
+    empty = tmp_path / "empty_site"
+    empty.mkdir()
+    monkeypatch.setattr(site, "getsitepackages", lambda: [str(empty)])
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(empty))
+    monkeypatch.setattr(
+        sysconfig, "get_paths", lambda *a, **kw: {"purelib": str(empty), "platlib": str(empty)}
+    )
+
+    from swap_cli import voice_ops
+
     assert voice_ops.patch_fairseq_dataclass_defaults() is True
 
 
