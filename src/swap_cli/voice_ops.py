@@ -93,10 +93,17 @@ FAIRSEQ_RUNTIME_DEPS = (
 # unresolvable versions. Install with --no-deps after seeding runtime deps.
 RVC_PYTHON_SPEC = "rvc-python>=0.1.5"
 
-# fairseq 0.12.2 has no wheels on py3.11+, source build is broken
-# (omegaconf<2.1 + hydra-core resolver loop, dataclass mutable default
-# on py3.12). Install from the archived repo's main branch.
-FAIRSEQ_GIT_URL = "git+https://github.com/facebookresearch/fairseq.git"
+# Facebook's fairseq is archived (March 2026) and doesn't run on modern
+# Python: dataclass strict mode rejects FairseqConfig's mutable defaults,
+# and omegaconf<2.1 (its required pin) chokes on Python 3.11+ pip
+# resolver. We install instead from One-sixth/fairseq — an RVC-friendly
+# community fork that:
+#   - rewrote the broken dataclass defaults to field(default=...)
+#   - bumped hydra-core>=1.3.2 + unpinned omegaconf
+#   - is actively maintained (last update Feb 2026)
+# This is the canonical fix in the RVC community for the modern-Python
+# fairseq problem.
+FAIRSEQ_GIT_URL = "git+https://github.com/One-sixth/fairseq.git"
 
 # CUDA torch index for Windows/Linux NVIDIA. RVC inference quality
 # depends on running on the GPU — without --index-url, pip's resolver
@@ -181,6 +188,25 @@ def install_fairseq_runtime_deps() -> bool:
     pip = [sys.executable, "-m", "pip", "install"]
     try:
         subprocess.check_call(pip + list(FAIRSEQ_RUNTIME_DEPS))
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def reinstall_fairseq_from_fork() -> bool:
+    """Uninstall the user's existing fairseq and reinstall from
+    One-sixth/fairseq. Used by `swap voices repair` to migrate users
+    who installed before Sprint 14g.4 (when we used the broken
+    facebookresearch fairseq main branch).
+
+    Idempotent: pip uninstall -y is a no-op if fairseq isn't installed,
+    and reinstalling from the same git URL on a fresh checkout is fine.
+    """
+    pip = [sys.executable, "-m", "pip"]
+    try:
+        # -y avoids the interactive prompt; failure is fine (not installed).
+        subprocess.run(pip + ["uninstall", "-y", "fairseq"], check=False)
+        subprocess.check_call(pip + ["install", "--no-deps", FAIRSEQ_GIT_URL])
         return True
     except subprocess.CalledProcessError:
         return False

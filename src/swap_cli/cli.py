@@ -526,22 +526,35 @@ def _download_catalog_entry(entry) -> None:  # type: ignore[no-untyped-def]
 
 @voices_app.command("repair")
 def voices_repair() -> None:
-    """Apply post-install patches for known dependency bugs.
+    """Migrate existing voice installs to the working fairseq fork.
 
-    Two fixes today:
-      1. Pip-install fairseq's runtime deps (hydra-core, bitarray, regex,
-         sacrebleu, scikit-learn, etc.) that pre-14g.3 installs missed
-         because we install fairseq itself with --no-deps. Idempotent.
-      2. Patch fairseq's mutable dataclass defaults (fairseq#5634; repo
-         archived; Python 3.11+ rejects them). Idempotent.
+    Three fixes (idempotent — safe to re-run):
+      1. Reinstall fairseq from One-sixth/fairseq — RVC-friendly fork
+         with dataclass + omegaconf fixes baked in. Replaces the broken
+         facebookresearch fairseq main that pre-14g.4 installs picked up.
+      2. Pip-install fairseq's runtime deps (hydra-core, bitarray, regex,
+         sacrebleu, scikit-learn, etc.) that --no-deps fairseq doesn't
+         pull. Pre-14g.3 installs missed these.
+      3. Patch fairseq's mutable dataclass defaults if any are still
+         present (no-op on the One-sixth fork; safety belt for users who
+         installed manually).
 
-    Run this if your voice session fails with either:
-        ModuleNotFoundError: No module named 'hydra'  (or bitarray, etc.)
+    Run this if voice sessions fail with anything resembling:
+        ModuleNotFoundError: No module named 'hydra'
         ValueError: mutable default ... for field common is not allowed
+        Object of unsupported type: '_MISSING_TYPE'
     """
     from . import voice_ops
 
-    console.print("[bold]Step 1/2[/bold]: installing fairseq runtime deps …")
+    console.print("[bold]Step 1/3[/bold]: reinstalling fairseq from One-sixth fork …")
+    if not voice_ops.reinstall_fairseq_from_fork():
+        err_console.print(
+            "[red]fairseq reinstall failed — see error above.[/red]"
+        )
+        raise typer.Exit(1)
+    console.print("[green]✓ fairseq from One-sixth/fairseq installed.[/green]")
+
+    console.print("[bold]Step 2/3[/bold]: installing fairseq runtime deps …")
     if not voice_ops.install_fairseq_runtime_deps():
         err_console.print(
             "[red]pip install failed — see error above.[/red] "
@@ -550,7 +563,7 @@ def voices_repair() -> None:
         raise typer.Exit(1)
     console.print("[green]✓ fairseq runtime deps in place.[/green]")
 
-    console.print("[bold]Step 2/2[/bold]: patching fairseq dataclass defaults …")
+    console.print("[bold]Step 3/3[/bold]: patching fairseq dataclass defaults …")
     if not voice_ops.patch_fairseq_dataclass_defaults():
         err_console.print(
             "[red]Patch failed — see error above.[/red] "
