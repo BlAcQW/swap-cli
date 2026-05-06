@@ -34,10 +34,40 @@ def test_get_engine_openvoice() -> None:
 
 
 def test_get_engine_rvc_stub() -> None:
-    """RVC engine registers but is_available() returns False until 14b.2."""
+    """RVC engine registers but is_available() returns False when
+    rvc_python isn't installed (the CI default)."""
     engine = voice_engines.get_engine("rvc")
     assert engine.name == "rvc"
     assert engine.is_available() is False
+    # is_ready() is also False — both module + voice are missing.
+    assert engine.is_ready() is False
+
+
+def test_rvc_is_ready_distinct_from_is_available(monkeypatch) -> None:
+    """Sprint 14d split: is_available() answers 'can I switch?',
+    is_ready() also requires a registered rvc-* voice."""
+    import importlib.util
+
+    # Pretend rvc_python is installed by stubbing find_spec.
+    real_find_spec = importlib.util.find_spec
+
+    def fake(name, *a, **kw):
+        if name == "rvc_python":
+            return object()  # truthy; signals "found"
+        return real_find_spec(name, *a, **kw)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
+
+    engine = voice_engines.get_engine("rvc")
+    # Module is "found" → available, but no rvc-* voices → not ready.
+    assert engine.is_available() is True
+    assert engine.is_ready() is False
+
+
+def test_openvoice_is_ready_equals_is_available() -> None:
+    """OpenVoice ships library voices, so ready ↔ available."""
+    engine = voice_engines.get_engine("openvoice")
+    assert engine.is_ready() == engine.is_available()
 
 
 def test_get_engine_unknown_raises() -> None:
@@ -76,6 +106,7 @@ def test_voice_engine_protocol_runtime_check() -> None:
         assert hasattr(engine, "name")
         assert hasattr(engine, "display_name")
         assert hasattr(engine, "is_available")
+        assert hasattr(engine, "is_ready")
         assert hasattr(engine, "extract_embedding")
         assert hasattr(engine, "make_converter")
 

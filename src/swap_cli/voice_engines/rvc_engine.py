@@ -46,12 +46,23 @@ class RVCEngine:
         return "RVC (streaming · per-voice .pth model)"
 
     def is_available(self) -> bool:
-        """True iff rvc-python is installed AND at least one .pth voice
-        is registered. RVC has no built-in speakers — users must
-        download a model and register via `swap voices add-rvc`."""
-        if importlib.util.find_spec("rvc_python") is None:
+        """True iff rvc-python module is importable.
+
+        Doesn't require a voice — answers 'can I switch the engine to RVC?'.
+        Use is_ready() to also gate on voice availability.
+        """
+        return importlib.util.find_spec("rvc_python") is not None
+
+    def is_ready(self) -> bool:
+        """True iff is_available() AND at least one rvc-* voice is registered.
+
+        RVC has no built-in speakers — users must download a model and
+        register via `swap voices add-rvc`. Live runtime gates on this;
+        the CLI engine-set gates on is_available() so users can flip the
+        preference *before* downloading their first .pth.
+        """
+        if not self.is_available():
             return False
-        # Need at least one RVC voice registered for the engine to be useful.
         from ..voice_library import load_user_voices
 
         return any(v.id.startswith("rvc-") for v in load_user_voices())

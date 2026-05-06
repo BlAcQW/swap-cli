@@ -294,6 +294,32 @@ def _run_voice_session(
         )
         raise typer.Exit(1)
 
+    # Sprint 14d: gate on engine readiness before spinning up audio
+    # devices. Otherwise the user gets an opaque RuntimeError mid-init.
+    from . import voice_engines
+
+    cfg_engine = config.load().voice_engine
+    engine = voice_engines.get_engine(cfg_engine)
+    if not engine.is_available():
+        err_console.print(
+            f"[red]Voice engine '{cfg_engine}' isn't installed.[/red] "
+            "Run [bold]swap voices install[/bold]."
+        )
+        raise typer.Exit(1)
+    if not engine.is_ready():
+        if cfg_engine == "rvc":
+            err_console.print(
+                "[red]RVC engine has no .pth voices registered.[/red] "
+                "Add one with [bold]swap voices add-rvc /path/to/model.pth --name X[/bold], "
+                "or switch back: [bold]swap voices engine openvoice[/bold]."
+            )
+        else:
+            err_console.print(
+                f"[red]Voice engine '{cfg_engine}' is installed but not ready.[/red] "
+                "Run [bold]swap voices install[/bold] to download missing weights."
+            )
+        raise typer.Exit(1)
+
     mic_idx, out_idx = voice_ops.resolve_voice_devices(mic, output)
     cable_hint = voice_router.virtual_cable_hint()
 
@@ -566,17 +592,20 @@ def voices_engine(
 
     cfg = _config.load()
     if name is None:
-        # Show current + available engines.
+        # Show current + available engines. "available?" = deps installed,
+        # "ready?" = also has at least one usable voice (RVC needs a .pth).
         table = Table(title="Voice engines", show_header=True, box=None)
         table.add_column("name", style="dim")
         table.add_column("display name")
         table.add_column("available?")
+        table.add_column("ready?")
         table.add_column("active")
         for engine_name in voice_engines.available_engines():
             engine = voice_engines.get_engine(engine_name)
             available = "[green]✓[/green]" if engine.is_available() else "[red]✗[/red]"
+            ready = "[green]✓[/green]" if engine.is_ready() else "[red]✗[/red]"
             active = "[bold]●[/bold]" if engine_name == cfg.voice_engine else ""
-            table.add_row(engine.name, engine.display_name, available, active)
+            table.add_row(engine.name, engine.display_name, available, ready, active)
         console.print(table)
         return
 
@@ -589,17 +618,27 @@ def voices_engine(
 
     engine = voice_engines.get_engine(name)
     if not engine.is_available():
+        # Refuse — Sprint 14d. Setting an unavailable engine as active
+        # left users in a corrupt state (engine ✗ ●) where Live failed
+        # opaquely. Force them to install first.
         err_console.print(
-            f"[yellow]⚠ Engine '{name}' isn't installed/available.[/yellow] "
-            "Run [bold]swap voices install[/bold] first."
+            f"[red]✗ Engine '{name}' isn't installed.[/red] "
+            "Run [bold]swap voices install[/bold] first, then retry."
         )
-        # Still save the preference — user may install later.
+        raise typer.Exit(1)
 
     _config.update(voice_engine=name)
     console.print(
         f"[green]✓ Default voice engine set to[/green] [bold]{name}[/bold]"
         f" ({engine.display_name})."
     )
+    # Soft-warn if available but not ready (e.g. RVC installed, no .pth yet).
+    if not engine.is_ready():
+        console.print(
+            f"[yellow]Note: '{name}' is available but not ready — "
+            "no usable voice registered yet.[/yellow] "
+            "For RVC, run [bold]swap voices add-rvc /path/to/model.pth --name X[/bold]."
+        )
 
 
 @voices_app.command("test")

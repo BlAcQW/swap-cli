@@ -131,11 +131,24 @@ def _check_gpu() -> Check:
 def _check_deps() -> Check:
     """True iff every voice-cloning runtime import is available.
 
-    MUST stay in sync with voice_model.voice_deps_present() — otherwise
-    `swap voices install` reports ✓ while the live session refuses to
-    start because OpenVoice (or another module) is missing.
+    `swap voices install` short-circuits when this returns ok — so the
+    list MUST mirror everything install_voice_deps() actually pulls in.
+    Specifically: OpenVoice (tone-color extraction) AND rvc-python +
+    fairseq (RVC streaming). If we omit one, users on a partial install
+    get '✓ already installed' even though half the engines won't load.
+
+    voice_model.voice_deps_present() is OpenVoice-only and intentionally
+    stays narrower — it gates only the OpenVoice runtime.
     """
-    required = ("torch", "torchaudio", "sounddevice", "librosa", "openvoice")
+    required = (
+        "torch",
+        "torchaudio",
+        "sounddevice",
+        "librosa",
+        "openvoice",
+        "rvc_python",  # Sprint 14d: noticed missing rvc-python after OpenVoice install
+        "fairseq",     # rvc-python imports fairseq for HuBERT loader
+    )
     missing = [m for m in required if importlib.util.find_spec(m) is None]
     if not missing:
         return Check(ok=True, label="voice deps installed")

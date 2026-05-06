@@ -45,6 +45,22 @@ def test_intel_mac_blocked(monkeypatch) -> None:
     assert "Intel" in check.label
 
 
+def test_check_deps_includes_rvc_python_and_fairseq() -> None:
+    """Sprint 14d: `swap voices install` short-circuits on this check, so
+    omitting rvc_python or fairseq makes the install command lie about
+    success when one of the engines is half-installed.
+    """
+    from swap_cli import voice_prereq
+    import inspect
+
+    src = inspect.getsource(voice_prereq._check_deps)
+    assert '"rvc_python"' in src, "rvc_python must be in the required tuple"
+    assert '"fairseq"' in src, "fairseq must be in the required tuple"
+    # And the existing OpenVoice deps must still be there.
+    for dep in ("torch", "torchaudio", "sounddevice", "librosa", "openvoice"):
+        assert f'"{dep}"' in src, f"{dep} must remain in the required tuple"
+
+
 def test_check_audio_cable_darwin_no_blackhole(monkeypatch, tmp_path) -> None:
     """When BlackHole isn't installed the hint points at brew."""
     from swap_cli import voice_prereq

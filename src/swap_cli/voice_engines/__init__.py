@@ -76,7 +76,21 @@ class VoiceEngine(Protocol):
         ...
 
     def is_available(self) -> bool:
-        """True iff Python deps + model weights are present locally."""
+        """True iff Python deps + model weights are present locally.
+
+        This gate answers "can the engine load if I switch to it?" — it
+        does NOT require user-supplied voices. Use is_ready() for that.
+        """
+        ...
+
+    def is_ready(self) -> bool:
+        """True iff is_available() AND there's at least one usable voice
+        for this engine (e.g. an rvc-* voice for RVC).
+
+        Engines with built-in library voices (OpenVoice) can default to
+        is_available(). Engines that require user-supplied voices (RVC)
+        must override.
+        """
         ...
 
     def extract_embedding(

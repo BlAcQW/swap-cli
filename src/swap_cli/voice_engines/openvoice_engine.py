@@ -47,6 +47,11 @@ class OpenVoiceEngine:
             weights_dir / "config.json"
         ).exists()
 
+    def is_ready(self) -> bool:
+        # OpenVoice ships base-speaker library voices, so being available
+        # is enough — there's always at least one voice usable.
+        return self.is_available()
+
     def extract_embedding(
         self, wav_path: "Path | str", device: str | None = None
     ) -> list[float]:
