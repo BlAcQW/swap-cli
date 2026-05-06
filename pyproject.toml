@@ -34,9 +34,16 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
 ]
-# Optional voice cloning extra. Only installed when the user explicitly opts
-# in via `swap voices install` from the GUI. PyTorch alone is ~2.5 GB so we
-# never pull this in the base install.
+# Optional voice-cloning extra. Sprint 14e: voice = RVC only (OpenVoice
+# removed). Only installed when the user explicitly opts in via
+# `swap voices install`. PyTorch + the RVC stack is ~3 GB; never pulled
+# in the base install.
+#
+# rvc-python (0.1.5, latest) pins fairseq==0.12.2 and numpy<=1.23.5 —
+# both unresolvable on modern stacks. `swap voices install` installs
+# rvc-python with --no-deps + a modern fairseq from git, after seeding
+# the runtime deps it actually uses (faiss, pyworld, omegaconf, …) at
+# modern versions that resolve. See voice_ops.install_voice_deps().
 voice = [
     "torch>=2.2",
     "torchaudio>=2.2",
@@ -44,21 +51,6 @@ voice = [
     "librosa>=0.10",
     "soundfile>=0.12",
     "huggingface-hub>=0.20",
-    # NOTE: OpenVoice itself is *not* listed here. Its setup.py pins
-    # numpy==1.22, librosa==0.9.1, av==10.* (the last has no Win+Py3.11
-    # wheel and breaks on modern Cython source builds). We install it
-    # separately via `swap voices install` with --no-deps so its broken
-    # transitive constraints don't poison the resolver. Tone-color
-    # conversion only needs torch + numpy + librosa, which are above.
-
-    # NOTE: rvc-python is also NOT listed here, for the same reason as
-    # OpenVoice. rvc-python==0.1.5 (latest on PyPI) pins fairseq==0.12.2
-    # (no wheels on Python 3.11+, repo archived March 2026) and
-    # numpy<=1.23.5 (conflicts with our numpy>=1.26 base). Both kill
-    # the resolver. `swap voices install` installs rvc-python with
-    # --no-deps + a modern fairseq from git, after seeding the runtime
-    # deps it actually uses (faiss, pyworld, omegaconf, …) at modern
-    # versions that resolve. See voice_ops.install_voice_deps().
 ]
 
 [project.scripts]

@@ -31,9 +31,9 @@ class Config:
     last_voice_id: str | None = None
     last_microphone: int | None = None
     last_voice_output: int | None = None
-    # Sprint 14b: which engine handles live streaming. 'openvoice' (default
-    # today) or 'rvc' (real streaming engine — wired in 14b.2.b).
-    voice_engine: str = "openvoice"
+    # Sprint 14e: voice path is RVC-only. Field kept for forward
+    # compatibility (future engines: Applio, GPT-SoVITS).
+    voice_engine: str = "rvc"
 
     @property
     def is_complete(self) -> bool:
@@ -63,7 +63,7 @@ def load() -> Config:
         last_voice_id=_clean(data.get("last_voice_id")),
         last_microphone=_int_or_none(data.get("last_microphone")),
         last_voice_output=_int_or_none(data.get("last_voice_output")),
-        voice_engine=_clean(data.get("voice_engine")) or "openvoice",
+        voice_engine=_clean(data.get("voice_engine")) or "rvc",
     )
 
 
@@ -89,7 +89,7 @@ def save(cfg: Config) -> Path:
         body.append(f"last_microphone = {cfg.last_microphone}")
     if cfg.last_voice_output is not None:
         body.append(f"last_voice_output = {cfg.last_voice_output}")
-    if cfg.voice_engine and cfg.voice_engine != "openvoice":
+    if cfg.voice_engine and cfg.voice_engine != "rvc":
         body.append(f'voice_engine = "{_escape(cfg.voice_engine)}"')
 
     text = "\n".join(body) + "\n"

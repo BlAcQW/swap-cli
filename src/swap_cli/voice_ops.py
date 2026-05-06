@@ -1,13 +1,17 @@
 """Implementations for the `swap voices` subcommand group.
 
-Sprint 13b.2: download_openvoice_weights pulls the real ToneColorConverter
-checkpoint from HuggingFace (~300 MB). list/add/remove operate on the
-user voice directory; add now uses the real OpenVoice tone-color
-extractor via voice_model.extract_embedding.
+Sprint 14e: OpenVoice removed. Voice path is RVC-only.
+- `install_voice_deps` installs CUDA-matched PyTorch first (Win/Linux NVIDIA),
+  then RVC's runtime deps + rvc-python + fairseq via --no-deps.
+- `add_rvc_voice` / `remove_rvc_voice` register RVC .pth models.
+- No more OpenVoice tone-color extraction; users either download community
+  RVC models (e.g. weights.gg, lj1995/VoiceConversionWebUI on HF) or
+  train their own with Applio.
 """
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import time
@@ -17,53 +21,26 @@ from pathlib import Path
 from .voice_library import (
     Voice,
     delete_user_voice,
-    load_all_voices,
-    load_library_voices,
     load_user_voices,
     save_user_voice,
     slugify,
     user_voices_dir,
 )
-from .voice_model import extract_embedding
-from .voice_prereq import (
-    OPENVOICE_WEIGHTS_DIRNAME,
-    check_all,
-    models_dir,
-    openvoice_weights_dir,
-)
+from .voice_prereq import models_dir, rvc_models_dir
 
 
-# ── Install: pip dep + weight download ────────────────────────────────────
+# ── Install: pip deps for the RVC streaming engine ────────────────────────
 
 
 @dataclass(frozen=True)
 class InstallResult:
     deps_installed: bool
-    weights_installed: bool
     error: str | None = None
 
 
-# OpenVoice v2 lives in MyShell's HuggingFace repo. We need:
-#   - converter/   the tone-color converter weights (~300 MB)
-#   - base_speakers/ses/*.pth   real speaker embeddings shipped with the
-#                               release (English/Spanish/French/etc.).
-#                               Tiny (~4 KB each) and gives users
-#                               actual-cloning library voices out of the box.
-OPENVOICE_HF_REPO = "myshell-ai/OpenVoiceV2"
-OPENVOICE_INCLUDE_PATTERNS = ["converter/*", "base_speakers/ses/*.pth"]
-
-
-# OpenVoice's setup.py pins librosa==0.9.1, numpy==1.22, av==10.* (av 10 has
-# no Win+Py3.11 wheel; source builds break on modern Cython). We install it
-# with --no-deps so its broken constraints don't poison the resolver. The
-# tone-color converter at runtime only needs torch + numpy + librosa +
-# soundfile, which we install directly below.
-OPENVOICE_GIT_URL = "git+https://github.com/myshell-ai/OpenVoice.git@main"
-
-# Voice-cloning dependencies we install directly (NOT via `pip install
-# '.[voice]'` because that would also try to reinstall swap-cli, which on
-# Windows fails with "process cannot access the file" — Windows holds
-# swap.exe open while the install runs from inside it).
+# RVC's runtime dep stack at modern resolved versions. rvc-python itself
+# pins fairseq==0.12.2 + numpy<=1.23.5 — both unresolvable on modern
+# stacks — so we install rvc-python with --no-deps after seeding these.
 VOICE_PACKAGES = (
     "torch>=2.2",
     "torchaudio>=2.2",
@@ -71,89 +48,72 @@ VOICE_PACKAGES = (
     "librosa>=0.10",
     "soundfile>=0.12",
     "huggingface-hub>=0.20",
-    # OpenVoice's package __init__ eagerly imports its full runtime deps
-    # even for tone-color-only conversion. Install the lot here so future
-    # installs don't trickle errors one missing module at a time.
-    #
-    # We use NEWER versions than OpenVoice's pyproject.toml pins where:
-    #   - older pin has no Win/Py3.11 wheel (faster-whisper 0.9 → av==10)
-    #   - newer version is API-compatible enough for tone-color path
-    "inflect>=7.0",
-    "unidecode>=1.3",
-    "eng-to-ipa>=0.0.2",
-    "pypinyin>=0.50",
-    "cn2an>=0.5",
-    "jieba>=0.42",
-    "langid>=1.1",
-    "pydub>=0.25",
-    "wavmark>=0.0.3",
-    "faster-whisper>=1.0",
-    "whisper-timestamped>=1.14",
-    # gradio is OpenVoice's web demo UI — not used by tone-color but
-    # imported eagerly at package load. ~40 MB transitive deps.
-    "gradio>=3.48",
-    # openai + python-dotenv are in OpenVoice's requirements.txt (not
-    # setup.py) for their demo notebooks. Included for completeness so
-    # 'import openvoice' never trips on a missing module.
-    "openai",
-    "python-dotenv",
-    # rvc-python's runtime deps, modernized so they have wheels on
-    # Win/Linux/macOS-arm64. rvc-python itself is installed below
-    # with --no-deps because its pyproject pins fairseq==0.12.2 and
-    # numpy<=1.23.5 — both unresolvable on modern stacks.
+    # rvc-python's actual runtime deps:
     "praat-parselmouth>=0.4.3",
-    "faiss-cpu>=1.8",      # rvc pins 1.7.3 — no arm64 wheel
-    "pyworld>=0.3.4",      # needs C compiler (Xcode CLT on Mac)
+    "faiss-cpu>=1.8",
+    "pyworld>=0.3.4",
     "torchcrepe>=0.0.20",
-    "omegaconf>=2.3",      # rvc pins 2.0.6 — conflicts with hydra-core
+    "omegaconf>=2.3",
     "ffmpeg-python>=0.2",
     "loguru>=0.7",
 )
 
 # rvc-python on PyPI peaks at 0.1.5 and pins fairseq + numpy at
-# unresolvable versions. We install with --no-deps after seeding its
-# runtime deps in VOICE_PACKAGES above.
+# unresolvable versions. Install with --no-deps after seeding runtime deps.
 RVC_PYTHON_SPEC = "rvc-python>=0.1.5"
 
 # fairseq 0.12.2 has no wheels on py3.11+, source build is broken
 # (omegaconf<2.1 + hydra-core resolver loop, dataclass mutable default
-# on py3.12). Install from the archived repo's main branch — it has
-# the py3.11 fixes that didn't make it into 0.12.2 on PyPI.
+# on py3.12). Install from the archived repo's main branch.
 FAIRSEQ_GIT_URL = "git+https://github.com/facebookresearch/fairseq.git"
+
+# CUDA torch index for Windows/Linux NVIDIA. RVC inference quality
+# depends on running on the GPU — without --index-url, pip's resolver
+# often picks the CPU torch wheel and the user wonders why their 4070
+# is idle. cu121 is a stable LTS window for RTX 30/40 drivers.
+TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu121"
+TORCH_CUDA_PACKAGES = ("torch>=2.2", "torchaudio>=2.2")
 
 
 def install_voice_deps() -> bool:
     """Install voice deps without touching swap-cli itself.
 
-    Four pip calls:
-      1. install VOICE_PACKAGES directly — modern resolved versions, no
-         swap-cli reinstall (avoids the Windows swap.exe lock).
-      2. install OpenVoice with --no-deps — keeps its broken transitive
-         pins (faster-whisper → av==10.*, etc.) out of the resolver.
-      3. install rvc-python with --no-deps — its pinned fairseq/numpy
-         are unresolvable; runtime deps were seeded in step 1.
-      4. install fairseq from git with --no-deps — the PyPI 0.12.2 has
-         no wheels on py3.11+ and source build fails on the omegaconf
-         resolver loop; the archived repo's main has the fixes.
+    Order matters:
+      1. Install CUDA-matched torch first (Windows/Linux NVIDIA only)
+         so subsequent `pip install` calls don't pull the CPU wheel.
+      2. Install VOICE_PACKAGES — modern resolved versions, rvc-python's
+         actual runtime deps (faiss, pyworld, omegaconf, etc.).
+      3. Install rvc-python with --no-deps.
+      4. Install fairseq from git with --no-deps — the PyPI 0.12.2 has
+         no wheels on py3.11+; the archived repo's main branch has the
+         fixes that didn't make it into the last release.
 
     Returns True iff every step succeeds.
     """
-    # Mac pre-flight: OpenVoice install (`git+...`) and pyworld build
-    # both need git + a C compiler — both ship with Xcode CLT.
-    if sys.platform == "darwin":
-        import shutil
-
-        if shutil.which("git") is None:
-            raise RuntimeError(
-                "git not found. Install Xcode Command Line Tools first:\n"
-                "    xcode-select --install\n"
-                "Then re-run `swap voices install`."
-            )
+    # macOS: OpenVoice is gone, but rvc-python's transitive build chain
+    # (pyworld, fairseq from git) still wants git + a C compiler — both
+    # ship with Xcode CLT. Note: macOS isn't a supported voice platform
+    # post-14e (Apple Silicon CPU is too slow for RVC live), but we keep
+    # the preflight so CI / curious users get a clear message.
+    if sys.platform == "darwin" and shutil.which("git") is None:
+        raise RuntimeError(
+            "git not found. Install Xcode Command Line Tools first:\n"
+            "    xcode-select --install\n"
+            "Then re-run `swap voices install`."
+        )
 
     pip = [sys.executable, "-m", "pip", "install"]
     try:
+        # CUDA torch first on NVIDIA platforms — keeps CPU torch from
+        # winning the resolver when later steps install other torch deps.
+        if _is_nvidia_platform():
+            subprocess.check_call(
+                pip
+                + ["--index-url", TORCH_CUDA_INDEX]
+                + list(TORCH_CUDA_PACKAGES)
+            )
+
         subprocess.check_call(pip + list(VOICE_PACKAGES))
-        subprocess.check_call(pip + ["--no-deps", OPENVOICE_GIT_URL])
         subprocess.check_call(pip + ["--no-deps", RVC_PYTHON_SPEC])
         subprocess.check_call(pip + ["--no-deps", FAIRSEQ_GIT_URL])
         return True
@@ -161,110 +121,34 @@ def install_voice_deps() -> bool:
         return False
 
 
-def download_openvoice_weights(progress: callable | None = None) -> Path:  # type: ignore[valid-type]
-    """Download OpenVoice v2 tone-color converter weights via HF Hub (~300 MB).
-
-    Pulls only `converter/*` from the OpenVoiceV2 repo — base TTS speakers
-    and BERT trees are unused by tone-color conversion. Writes a sentinel
-    `installed.ok` once complete so the prereq check passes.
-    """
-    target = openvoice_weights_dir()
-    target.mkdir(parents=True, exist_ok=True)
-
-    try:
-        from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
-    except ImportError as err:
-        raise RuntimeError(
-            "huggingface-hub not installed. Run `swap voices install` first."
-        ) from err
-
-    if progress:
-        progress(0.0)
-
-    snapshot_download(
-        repo_id=OPENVOICE_HF_REPO,
-        local_dir=str(target),
-        allow_patterns=OPENVOICE_INCLUDE_PATTERNS,
-        local_dir_use_symlinks=False,
-    )
-
-    sentinel = target / "installed.ok"
-    sentinel.write_text(
-        f"repo={OPENVOICE_HF_REPO}\ndownloaded_at={int(time.time())}\n",
-        encoding="utf-8",
-    )
-
-    if progress:
-        progress(1.0)
-    return target
-
-
-def uninstall_openvoice_weights() -> bool:
-    """Delete the OpenVoice weights directory. Returns True if removed."""
-    target = openvoice_weights_dir()
-    if not target.exists():
+def _is_nvidia_platform() -> bool:
+    """True iff we're on Windows or Linux with `nvidia-smi` reachable.
+    macOS never has CUDA; Linux without NVIDIA falls through to the
+    plain pypi torch (which is fine — CPU)."""
+    if sys.platform == "darwin":
         return False
-    import shutil
-
-    shutil.rmtree(target)
-    return True
+    return shutil.which("nvidia-smi") is not None
 
 
 # ── Library/user voice operations ─────────────────────────────────────────
 
 
 def list_all() -> tuple[list[Voice], list[Voice]]:
-    """Return (library_voices, user_voices) for display."""
-    return load_library_voices(), load_user_voices()
+    """Return (library_voices, user_voices) for display.
 
-
-def add_user_voice(wav_path: Path, display_name: str | None = None) -> Voice:
-    """Extract an OpenVoice embedding from a reference audio file and
-    save it as a user voice.
-
-    Raises:
-        FileNotFoundError: if wav_path doesn't exist.
-        RuntimeError: if voice deps aren't installed.
+    Sprint 14e: library is intentionally empty — the bundled OpenVoice
+    embeddings were removed. User voices are RVC voices added via
+    `swap voices add-rvc`. Returning the tuple shape preserves the
+    `voices list` UI: 'Library voices: empty', 'Your voices: …'.
     """
-    if not wav_path.exists():
-        raise FileNotFoundError(f"Reference audio not found: {wav_path}")
-
-    name = display_name or wav_path.stem.replace("_", " ").replace("-", " ").strip()
-    voice_id = slugify(name)
-
-    # Real OpenVoice tone-color extraction (13b.2). Runs on CPU in ~5 s.
-    embedding = extract_embedding(wav_path)
-
-    voice = Voice(
-        id=voice_id,
-        name=name,
-        description=f"Custom voice from {wav_path.name}",
-        source="user",
-        embedding=embedding,
-        sample_rate=16_000,
-        created_at=int(time.time()),
-    )
-    save_user_voice(voice)
-    return voice
+    return [], load_user_voices()
 
 
-def remove_user_voice(name_or_id: str) -> bool:
-    """Remove a user voice by id or name. Returns True if removed."""
-    target_id = slugify(name_or_id)
-    if delete_user_voice(target_id):
-        return True
-    # Fall back: maybe they passed the display name as-is.
-    for v in load_user_voices():
-        if v.name.lower() == name_or_id.lower() or v.id == name_or_id:
-            return delete_user_voice(v.id)
-    return False
-
-
-# ── Standalone voice session runner (shared by CLI + GUI) ─────────────────
+# ── Standalone voice session helpers ──────────────────────────────────────
 
 
 def find_voice_by_name_or_id(name_or_id: str) -> Voice | None:
-    """Resolve a voice by id, slug, or display name across library + user."""
+    """Resolve a voice by id, slug, or display name across the user library."""
     from .voice_library import find_voice, load_all_voices
 
     direct = find_voice(name_or_id)
@@ -299,7 +183,7 @@ def resolve_voice_devices(
     return mic_idx, out_idx
 
 
-# ── RVC voice management (Sprint 14b.2.b) ──────────────────────────────────
+# ── RVC voice management ──────────────────────────────────────────────────
 
 
 def add_rvc_voice(
@@ -311,19 +195,16 @@ def add_rvc_voice(
 
     Copies the .pth (and optional .index) into the per-voice subdirectory
     inside the RVC models dir, then writes a Voice record so the
-    GUI/CLI dropdown surfaces it. The .index file is a Faiss retrieval
-    index that improves quality — recommended but optional.
+    GUI/CLI dropdown surfaces it. The .index file enables retrieval-
+    based feature mixing — recommended quality boost when present.
 
-    The Voice record uses:
+    Voice record convention:
       - id: 'rvc-<slug>'  (the 'rvc-' prefix is how RVCEngine recognises
         it during make_converter)
       - source: 'library'  (shipped + user-added live in the same list)
       - embedding: [] (RVC's voice identity is the .pth file, not a
-        speaker SE; the embedding field stays empty for RVC voices and
-        the engine reads voice.id to find the model)
+        speaker SE; the engine reads voice.id to find the model)
     """
-    from .voice_prereq import rvc_models_dir
-
     if not pth_path.exists():
         raise FileNotFoundError(f"RVC model not found: {pth_path}")
     if not pth_path.suffix == ".pth":
@@ -332,7 +213,6 @@ def add_rvc_voice(
     display_name = name or pth_path.stem.replace("_", " ").replace("-", " ").strip()
     voice_id = f"rvc-{slugify(display_name)}"
 
-    # Copy the .pth (and .index if given) into rvc_models_dir/<voice_id>/.
     target_dir = rvc_models_dir() / voice_id
     target_dir.mkdir(parents=True, exist_ok=True)
     target_pth = target_dir / pth_path.name
@@ -350,7 +230,7 @@ def add_rvc_voice(
         name=display_name,
         description=f"RVC voice from {pth_path.name}",
         source="library",
-        embedding=[],  # RVC uses the .pth file directly, not an SE vector
+        embedding=[],
         sample_rate=16_000,
         created_at=int(time.time()),
     )
@@ -360,10 +240,6 @@ def add_rvc_voice(
 
 def remove_rvc_voice(name_or_id: str) -> bool:
     """Remove an RVC voice — both the JSON record and the model files."""
-    import shutil
-
-    from .voice_prereq import rvc_models_dir
-
     target_id = (
         name_or_id if name_or_id.startswith("rvc-") else f"rvc-{slugify(name_or_id)}"
     )
@@ -382,8 +258,6 @@ def remove_rvc_voice(name_or_id: str) -> bool:
 
 def rvc_model_path_for(voice: Voice) -> Path | None:
     """Return the .pth file for an RVC voice, or None if not found."""
-    from .voice_prereq import rvc_models_dir
-
     if not voice.id.startswith("rvc-"):
         return None
     model_dir = rvc_models_dir() / voice.id
@@ -399,8 +273,6 @@ def rvc_index_path_for(voice: Voice) -> Path | None:
     The .index file enables retrieval-based feature mixing — improves
     quality but is optional.
     """
-    from .voice_prereq import rvc_models_dir
-
     if not voice.id.startswith("rvc-"):
         return None
     model_dir = rvc_models_dir() / voice.id

@@ -1,17 +1,14 @@
 """Voice cloning engine registry.
 
 A `VoiceEngine` knows how to:
-  - Tell whether its dependencies + weights are present locally.
-  - Extract a 256-d (or longer) speaker embedding from a reference WAV
-    — used by `swap voices add`.
+  - Tell whether its dependencies are present (is_available) and whether
+    a usable voice is registered (is_ready).
   - Build a stateful `VoiceConverter` that streams mic chunks → cloned
     audio chunks — used by `swap gui --voice` and `swap voice`.
 
-The registry lets the rest of swap-cli stay engine-agnostic. Currently:
-  - OpenVoiceEngine: works for one-shot extraction + chunk-by-chunk
-    inference, but doesn't streaming-fit (sprint 14a discovered this).
-  - RVCEngine: real streaming engine, the standard for live voice
-    cloning. Implementation lands in sprint 14b.2.
+Sprint 14e: OpenVoice removed. RVC is the only engine. The registry
+shape is preserved so future engines (Applio, GPT-SoVITS, etc.) can
+slot in without rewriting voice_track.
 """
 
 from __future__ import annotations
@@ -143,17 +140,9 @@ def available_engines() -> list[str]:
 
 
 def default_engine_name() -> str:
-    """Pick the best available engine. RVC > OpenVoice once 14b.2 ships."""
-    # Until RVC engine is implemented, OpenVoice is the only working choice.
-    for candidate in ("rvc", "openvoice"):
-        if candidate in _REGISTRY:
-            engine = get_engine(candidate)
-            if engine.is_available():
-                return candidate
-    return "openvoice"
+    """The single live-voice engine. Always returns 'rvc' post-14e."""
+    return "rvc"
 
 
-# Trigger registration of the built-in engines. Imports are deferred so a
-# missing optional dep on one engine doesn't break the whole module.
-from . import openvoice_engine  # noqa: E402, F401
+# Trigger registration of built-in engines.
 from . import rvc_engine  # noqa: E402, F401

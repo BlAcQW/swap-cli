@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 def test_config_voice_engine_default(tmp_path, monkeypatch) -> None:
-    """Fresh config has voice_engine='openvoice' by default."""
+    """Sprint 14e: fresh config has voice_engine='rvc' by default."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     # Reload the module after env change so config_path() is fresh.
     import importlib
@@ -34,7 +34,7 @@ def test_config_voice_engine_default(tmp_path, monkeypatch) -> None:
 
     importlib.reload(_config)
     cfg = _config.load()
-    assert cfg.voice_engine == "openvoice"
+    assert cfg.voice_engine == "rvc"
 
 
 def test_config_voice_engine_persists(tmp_path, monkeypatch) -> None:
@@ -67,7 +67,7 @@ def test_config_voice_engine_does_not_break_old_config(tmp_path, monkeypatch) ->
         encoding="utf-8",
     )
     cfg = _config.load()
-    assert cfg.voice_engine == "openvoice"  # default applied
+    assert cfg.voice_engine == "rvc"  # default applied
     assert cfg.voice_enabled is True
 
 
@@ -125,7 +125,7 @@ def test_voicetrack_rejects_unavailable_engine() -> None:
 
 
 def test_voicetrack_options_default_engine() -> None:
-    """VoiceTrackOptions defaults to 'openvoice' when engine_name omitted."""
+    """VoiceTrackOptions defaults to 'rvc' when engine_name omitted."""
     from swap_cli.voice_library import Voice
     from swap_cli.voice_track import VoiceTrackOptions
 
@@ -143,7 +143,7 @@ def test_voicetrack_options_default_engine() -> None:
         microphone_device=0,
         output_device=None,
     )
-    assert opts.engine_name == "openvoice"
+    assert opts.engine_name == "rvc"
 
 
 if __name__ == "__main__":

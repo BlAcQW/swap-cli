@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import socket
 import sys
 from pathlib import Path
@@ -307,17 +308,12 @@ def _run_voice_session(
         )
         raise typer.Exit(1)
     if not engine.is_ready():
-        if cfg_engine == "rvc":
-            err_console.print(
-                "[red]RVC engine has no .pth voices registered.[/red] "
-                "Add one with [bold]swap voices add-rvc /path/to/model.pth --name X[/bold], "
-                "or switch back: [bold]swap voices engine openvoice[/bold]."
-            )
-        else:
-            err_console.print(
-                f"[red]Voice engine '{cfg_engine}' is installed but not ready.[/red] "
-                "Run [bold]swap voices install[/bold] to download missing weights."
-            )
+        err_console.print(
+            "[red]No RVC .pth voices registered.[/red] "
+            "Add one with [bold]swap voices add-rvc /path/to/model.pth --name X[/bold].\n"
+            "Get models from [link]https://huggingface.co/lj1995/VoiceConversionWebUI[/link] "
+            "or [link]https://weights.gg[/link], or train your own with Applio."
+        )
         raise typer.Exit(1)
 
     mic_idx, out_idx = voice_ops.resolve_voice_devices(mic, output)
@@ -379,11 +375,11 @@ def _run_voice_session(
 
 @voices_app.command("install")
 def voices_install() -> None:
-    """Install voice deps + download OpenVoice tone-color weights (~300 MB).
+    """Install voice deps for the RVC streaming engine.
 
-    Pulls torch + torchaudio + sounddevice + librosa + soundfile +
-    huggingface-hub + OpenVoice via pip, then downloads the converter
-    checkpoint to the user data dir.
+    Sprint 14e: Pulls CUDA-matched PyTorch first (Win/Linux NVIDIA),
+    then RVC's runtime deps + rvc-python + fairseq. ~3–5 GB total.
+    No more OpenVoice weight download — voice paths are RVC-only.
     """
     from . import voice_ops, voice_prereq
 
@@ -395,76 +391,54 @@ def voices_install() -> None:
         )
         raise typer.Exit(2)
 
+    # Surface ffmpeg + Build Tools issues BEFORE the long pip install.
+    if not pre.ffmpeg.ok:
+        err_console.print(
+            f"[red]✗ {pre.ffmpeg.label}.[/red] {pre.ffmpeg.hint}"
+        )
+        raise typer.Exit(2)
+    if not pre.build_tools.ok:
+        err_console.print(
+            f"[red]✗ {pre.build_tools.label}.[/red] {pre.build_tools.hint}"
+        )
+        raise typer.Exit(2)
+
     if pre.deps_installed.ok:
         console.print("[green]✓ voice deps already installed.[/green]")
-    else:
-        console.print(
-            "Installing voice deps via "
-            f"[bold]{sys.executable} -m pip install '.[voice]'[/bold] …"
-        )
-        if not voice_ops.install_voice_deps():
-            err_console.print("[red]pip install failed.[/red]")
-            raise typer.Exit(1)
-        console.print("[green]✓ voice deps installed.[/green]")
-
-    # Always run snapshot_download — it's idempotent (skips files already
-    # present) and lets us pick up new patterns added to OPENVOICE_INCLUDE_
-    # PATTERNS in later releases (e.g. base_speakers/ses/*.pth landed
-    # after the initial converter/* download). HF Hub returns in <1s when
-    # everything's already local.
-    if pre.weights.ok:
-        console.print(
-            f"[dim]OpenVoice weights present at {voice_prereq.openvoice_weights_dir()}; "
-            "checking for additional files…[/dim]"
-        )
-    else:
-        console.print("Downloading OpenVoice weights …")
-    target = voice_ops.download_openvoice_weights()
-    console.print(f"[green]✓ weights ready at {target}.[/green]")
+        return
 
     console.print(
-        "\n[dim]Voice cloning ready. Open `swap gui`, click Enable, "
-        "pick a voice from the library and a virtual audio cable as the "
-        "output. Click ③ Live and you're cloning live.[/dim]"
+        "Installing RVC voice stack — CUDA torch, runtime deps, rvc-python, fairseq …"
     )
+    if not voice_ops.install_voice_deps():
+        err_console.print("[red]pip install failed.[/red]")
+        raise typer.Exit(1)
+    console.print("[green]✓ voice deps installed.[/green]")
 
-
-@voices_app.command("uninstall")
-def voices_uninstall() -> None:
-    """Remove OpenVoice weights from disk."""
-    from . import voice_ops
-
-    if voice_ops.uninstall_openvoice_weights():
-        console.print("[green]✓ OpenVoice weights removed.[/green]")
-    else:
-        console.print("[dim]No weights present — nothing to remove.[/dim]")
+    console.print(
+        "\n[dim]Next: download an RVC .pth model (e.g. from weights.gg or "
+        "huggingface.co/lj1995/VoiceConversionWebUI), register it with "
+        "`swap voices add-rvc /path/to/model.pth --name X`, then "
+        "`swap gui --voice`.[/dim]"
+    )
 
 
 @voices_app.command("list")
 def voices_list() -> None:
-    """List the bundled library + any user-added voices."""
+    """List the user-added RVC voices."""
     from . import voice_ops
 
-    library, user = voice_ops.list_all()
+    _, user = voice_ops.list_all()
 
-    table = Table(title="Library voices (bundled)", show_header=True, box=None)
-    table.add_column("id", style="dim")
-    table.add_column("name")
-    table.add_column("description")
-    if not library:
-        table.add_row("(empty)", "—", "Run a swap-cli release that bundles voices.")
-    for v in library:
-        table.add_row(v.id, v.name, v.description)
-    console.print(table)
-
-    table = Table(title="Your voices (custom)", show_header=True, box=None)
+    table = Table(title="Your voices (RVC)", show_header=True, box=None)
     table.add_column("id", style="dim")
     table.add_column("name")
     table.add_column("description")
     if not user:
         table.add_row(
             "(empty)", "—",
-            "Add one with `swap voices add ./me.wav --name \"Me\"`."
+            "Download an RVC .pth (weights.gg or HF lj1995/VoiceConversionWebUI), "
+            "then `swap voices add-rvc /path/to/model.pth --name \"Name\"`.",
         )
     for v in user:
         table.add_row(v.id, v.name, v.description)
@@ -473,28 +447,38 @@ def voices_list() -> None:
 
 @voices_app.command("add")
 def voices_add(
-    path: Annotated[Path, typer.Argument(help="Path to a WAV/MP3 reference.")],
+    path: Annotated[Path, typer.Argument(help="Path to an RVC .pth model.")],
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Display name. Defaults to file stem."),
     ] = None,
 ) -> None:
-    """Add a custom reference voice from a WAV/MP3."""
+    """Deprecated alias of `swap voices add-rvc`.
+
+    Sprint 14e removed OpenVoice; the WAV-to-embedding flow no longer
+    exists. To clone your own voice, train an RVC model with Applio
+    (https://github.com/IAHispano/Applio) and register the resulting
+    .pth + .index here.
+    """
+    err_console.print(
+        "[yellow]`swap voices add` (OpenVoice WAV→embedding) was removed in 14e.[/yellow]\n"
+        "Use [bold]swap voices add-rvc /path/to/model.pth --name X[/bold] for an "
+        "RVC .pth, or train your own with Applio.\n"
+        "Forwarding to add-rvc with the supplied path …"
+    )
     from . import voice_ops
 
     try:
-        voice = voice_ops.add_user_voice(path, name)
+        voice = voice_ops.add_rvc_voice(path, name)
     except FileNotFoundError as err:
         err_console.print(f"[red]{err}[/red]")
         raise typer.Exit(1) from err
-    except RuntimeError as err:
+    except (ValueError, RuntimeError) as err:
         err_console.print(f"[red]{err}[/red]")
         raise typer.Exit(2) from err
 
     console.print(
-        f"[green]✓ Added[/green] [bold]{voice.name}[/bold] "
-        f"(id: {voice.id}) — {voice.description}\n"
-        f"[dim]Saved to {voice_ops.user_voices_dir() / (voice.id + '.json')}[/dim]"
+        f"[green]✓ Added[/green] [bold]{voice.name}[/bold] (id: {voice.id})"
     )
 
 
@@ -574,18 +558,14 @@ def voices_engine(
     name: Annotated[
         str | None,
         typer.Argument(
-            help=(
-                "Engine to set as default for live streaming "
-                "(openvoice | rvc). Omit to print current setting + list."
-            ),
+            help="Engine to set as default. Omit to print current setting + list.",
         ),
     ] = None,
 ) -> None:
     """Pick which engine handles live voice streaming.
 
-    OpenVoice (current default) is good for one-shot extraction but
-    streaming-limited (chunked output produces 'phoneme repeat' artifacts).
-    RVC (production streaming engine) lands in sprint 14b.2.b.
+    Sprint 14e: only 'rvc' is registered. Field exists for forward
+    compatibility with future engines (Applio, GPT-SoVITS).
     """
     from . import config as _config
     from . import voice_engines
@@ -732,6 +712,20 @@ async def _doctor() -> None:
     table.add_row("decart import", _import_ok("decart"))
     table.add_row("opencv import", _import_ok("cv2"))
     table.add_row("av import", _import_ok("av"))
+
+    # ffmpeg on PATH — RVC needs it for any non-WAV codec; missing
+    # ffmpeg accounts for ~half the 'file failed to load' errors per
+    # the upstream RVC community.
+    if shutil.which("ffmpeg") is not None:
+        table.add_row("ffmpeg on PATH", "[green]✓[/green]")
+    else:
+        if sys.platform == "win32":
+            hint = "winget install Gyan.FFmpeg"
+        elif sys.platform == "darwin":
+            hint = "brew install ffmpeg"
+        else:
+            hint = "sudo apt install ffmpeg"
+        table.add_row("ffmpeg on PATH", f"[red]✗ {hint}[/red]")
 
     # macOS-only: customtkinter needs Tcl/Tk >= 8.6.9. The system Python
     # ships 8.5.9 which fails silently or renders broken windows. Surface

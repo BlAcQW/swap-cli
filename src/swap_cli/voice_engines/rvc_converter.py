@@ -82,7 +82,17 @@ class RVCConverter:
         models_dir = str(rvc_models_dir())
         Path(models_dir).mkdir(parents=True, exist_ok=True)
 
-        self._inference = RVCInference(models_dir=models_dir, device=device)
+        # Sprint 14e: use fp16 on CUDA — free 2x speedup on RTX 30/40-series
+        # with no audible quality loss (per the RVC realtime guide). On CPU
+        # fp16 is unsupported, so fall back to fp32 there.
+        is_half = device.startswith("cuda")
+        try:
+            self._inference = RVCInference(
+                models_dir=models_dir, device=device, is_half=is_half
+            )
+        except TypeError:
+            # Older rvc-python builds don't expose is_half on the constructor.
+            self._inference = RVCInference(models_dir=models_dir, device=device)
         self._inference.load_model(
             str(self.model_pth),
             index_path=str(self.index_pth) if self.index_pth is not None else "",

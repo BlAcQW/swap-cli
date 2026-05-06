@@ -831,9 +831,9 @@ class _EnableVoiceModal(ctk.CTkToplevel):
         ctk.CTkLabel(
             outer,
             text=(
-                "Voice features add ~3 GB of dependencies plus an OpenVoice\n"
-                "model checkpoint. Audio routing into Zoom/OBS needs a virtual\n"
-                "audio cable (BlackHole on macOS, VB-Cable on Windows)."
+                "Voice features add ~3 GB of CUDA-matched PyTorch + RVC stack.\n"
+                "You'll also need an RVC .pth model (download from weights.gg)\n"
+                "and a virtual audio cable (BlackHole on macOS, VB-Cable on Windows)."
             ),
             anchor="w",
             justify="left",
@@ -885,8 +885,9 @@ class _EnableVoiceModal(ctk.CTkToplevel):
 
         rows = [
             ("GPU", result.gpu),
-            ("Voice deps (torch, sounddevice, librosa)", result.deps_installed),
-            ("OpenVoice weights", result.weights),
+            ("Voice deps (torch, rvc-python, fairseq)", result.deps_installed),
+            ("ffmpeg on PATH", result.ffmpeg),
+            ("Visual C++ Build Tools", result.build_tools),
             ("Virtual audio cable", result.audio_cable),
         ]
         for title, check in rows:
@@ -954,8 +955,6 @@ class _EnableVoiceModal(ctk.CTkToplevel):
                 if not ok:
                     self._on_install_error("pip install failed")
                     return
-            if not pre.weights.ok:
-                voice_ops.download_openvoice_weights()
             _config.update(voice_enabled=True)
             self.after(0, self._on_install_done)
         except Exception as err:  # noqa: BLE001

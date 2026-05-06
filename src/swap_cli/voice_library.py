@@ -1,21 +1,21 @@
-"""Voice library: bundled presets + user-added voices.
+"""Voice library: user-added RVC voices.
 
 Each voice is stored as a small JSON file containing:
-  - id: stable slug
+  - id: 'rvc-<slug>' for RVC voices (the only kind post-14e)
   - name: display name
   - description: shown in the dropdown
-  - source: 'library' | 'user'
-  - embedding: list[float] — OpenVoice tone-color embedding (256 dims)
-  - sample_rate: int — sample rate the embedding was extracted at
+  - source: 'library' (RVC voices live in the user data dir but display
+            in the same list — convention is 'library')
+  - embedding: [] for RVC voices (identity is the .pth file on disk)
+  - sample_rate: int — RVC's pipeline operates at 16kHz internally
   - created_at: unix seconds
 
-Bundled voices live inside the package at swap_cli/voices/library/*.json
-(read-only). User voices live in ~/.swap/voices/*.json (read/write).
+Sprint 14e: bundled OpenVoice library voices removed. The library/ dir
+no longer exists in the package.
 """
 
 from __future__ import annotations
 
-import importlib.resources
 import json
 import time
 from dataclasses import dataclass
@@ -74,103 +74,13 @@ class Voice:
 
 
 def load_library_voices() -> list[Voice]:
-    """Return voices bundled with the package."""
-    voices: list[Voice] = []
-    try:
-        library = importlib.resources.files("swap_cli.voices.library")
-    except (ModuleNotFoundError, FileNotFoundError, ImportError):
-        return voices
-
-    for entry in library.iterdir():
-        if not entry.name.endswith(".json"):
-            continue
-        try:
-            voices.append(Voice.from_json(entry.read_text(encoding="utf-8")))
-        except Exception as err:  # noqa: BLE001
-            print(f"[voice_library] skipping {entry.name}: {err}", flush=True)
-    voices.sort(key=lambda v: v.name.lower())
-    return voices
-
-
-# Human-friendly labels for OpenVoice's bundled base-speaker .pth files.
-# Map keyed by file stem (without .pth). Anything not in this dict gets a
-# fallback label so new speakers in future OpenVoice releases still appear.
-_OPENVOICE_SPEAKER_LABELS = {
-    "en-default": ("EN — Default", "OpenVoice English, neutral default speaker"),
-    "en-us": ("EN — American", "OpenVoice English, American accent"),
-    "en-br": ("EN — British", "OpenVoice English, British accent"),
-    "en-au": ("EN — Australian", "OpenVoice English, Australian accent"),
-    "en-india": ("EN — Indian", "OpenVoice English, Indian accent"),
-    "en-newest": ("EN — Newest", "OpenVoice English, newest training run"),
-    "es": ("ES — Spanish", "OpenVoice Spanish base speaker"),
-    "fr": ("FR — French", "OpenVoice French base speaker"),
-    "jp": ("JP — Japanese", "OpenVoice Japanese base speaker"),
-    "kr": ("KR — Korean", "OpenVoice Korean base speaker"),
-    "zh": ("ZH — Chinese", "OpenVoice Chinese base speaker"),
-}
-
-
-def load_openvoice_base_speakers() -> list[Voice]:
-    """Load the real OpenVoice base-speaker embeddings shipped with the V2
-    release (downloaded by `swap voices install` into the user data dir).
-
-    Returns [] if torch isn't installed or the weights aren't downloaded —
-    falls through to the placeholder bundled library + user voices.
-    """
-    voices: list[Voice] = []
-    try:
-        from .voice_prereq import openvoice_weights_dir
-    except Exception:  # noqa: BLE001
-        return voices
-
-    ses_dir = openvoice_weights_dir() / "base_speakers" / "ses"
-    if not ses_dir.exists():
-        return voices
-
-    try:
-        import torch
-    except ImportError:
-        return voices
-
-    for pth in sorted(ses_dir.glob("*.pth")):
-        stem = pth.stem
-        try:
-            tensor = torch.load(str(pth), map_location="cpu", weights_only=True)
-            embedding = tensor.detach().reshape(-1).cpu().tolist()
-        except Exception as err:  # noqa: BLE001
-            print(f"[voice_library] skipping {pth.name}: {err}", flush=True)
-            continue
-
-        if len(embedding) != 256:
-            print(
-                f"[voice_library] {pth.name} has unexpected dim "
-                f"{len(embedding)}, expected 256 — skipping",
-                flush=True,
-            )
-            continue
-
-        name, desc = _OPENVOICE_SPEAKER_LABELS.get(
-            stem,
-            (f"OpenVoice {stem}", f"OpenVoice base speaker '{stem}'"),
-        )
-
-        voices.append(
-            Voice(
-                id=f"openvoice-{stem}",
-                name=name,
-                description=desc,
-                source="library",
-                embedding=embedding,
-                sample_rate=16_000,
-                created_at=0,
-            )
-        )
-
-    return voices
+    """No bundled library voices post-14e. Kept as a stub so callers that
+    still import this don't break; future engines can repopulate it."""
+    return []
 
 
 def load_user_voices() -> list[Voice]:
-    """Return voices the user added via `swap voices add`."""
+    """Return voices the user added via `swap voices add-rvc`."""
     voices: list[Voice] = []
     base = user_voices_dir()
     if not base.exists():
@@ -186,12 +96,9 @@ def load_user_voices() -> list[Voice]:
 
 
 def load_all_voices() -> list[Voice]:
-    """Return voices in display priority order:
-      1. Real OpenVoice base speakers (downloaded by `swap voices install`)
-      2. Bundled placeholder library voices (Aria/Ben/etc. — pre-13b.3)
-      3. User-added custom voices
-    """
-    return load_openvoice_base_speakers() + load_library_voices() + load_user_voices()
+    """Return all voices the user can pick from the dropdown.
+    Post-14e this is just user-added RVC voices."""
+    return load_user_voices()
 
 
 def find_voice(voice_id: str) -> Voice | None:

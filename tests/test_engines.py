@@ -18,56 +18,45 @@ from swap_cli import voice_engines  # noqa: E402
 from swap_cli.voice_engines import VoiceEngine  # noqa: E402
 
 
-def test_registry_lists_both_engines() -> None:
-    """Both built-in engines self-register on module import."""
+def test_registry_only_has_rvc() -> None:
+    """Sprint 14e: OpenVoice engine removed. RVC is the only registered
+    voice engine."""
     names = voice_engines.available_engines()
-    assert "openvoice" in names
-    assert "rvc" in names
+    assert names == ["rvc"]
 
 
-def test_get_engine_openvoice() -> None:
-    engine = voice_engines.get_engine("openvoice")
-    assert engine.name == "openvoice"
+def test_get_engine_rvc() -> None:
+    engine = voice_engines.get_engine("rvc")
+    assert engine.name == "rvc"
     assert isinstance(engine, VoiceEngine)
-    # Display name is the user-facing label — not empty.
     assert engine.display_name
 
 
-def test_get_engine_rvc_stub() -> None:
+def test_get_engine_rvc_not_available_in_ci() -> None:
     """RVC engine registers but is_available() returns False when
     rvc_python isn't installed (the CI default)."""
     engine = voice_engines.get_engine("rvc")
-    assert engine.name == "rvc"
     assert engine.is_available() is False
-    # is_ready() is also False — both module + voice are missing.
     assert engine.is_ready() is False
 
 
 def test_rvc_is_ready_distinct_from_is_available(monkeypatch) -> None:
-    """Sprint 14d split: is_available() answers 'can I switch?',
-    is_ready() also requires a registered rvc-* voice."""
+    """is_available() answers 'can I switch?', is_ready() also requires
+    a registered rvc-* voice."""
     import importlib.util
 
-    # Pretend rvc_python is installed by stubbing find_spec.
     real_find_spec = importlib.util.find_spec
 
     def fake(name, *a, **kw):
         if name == "rvc_python":
-            return object()  # truthy; signals "found"
+            return object()
         return real_find_spec(name, *a, **kw)
 
     monkeypatch.setattr(importlib.util, "find_spec", fake)
 
     engine = voice_engines.get_engine("rvc")
-    # Module is "found" → available, but no rvc-* voices → not ready.
     assert engine.is_available() is True
     assert engine.is_ready() is False
-
-
-def test_openvoice_is_ready_equals_is_available() -> None:
-    """OpenVoice ships library voices, so ready ↔ available."""
-    engine = voice_engines.get_engine("openvoice")
-    assert engine.is_ready() == engine.is_available()
 
 
 def test_get_engine_unknown_raises() -> None:
@@ -83,19 +72,9 @@ def test_rvc_engine_extract_embedding_explains_path_only() -> None:
         engine.extract_embedding("/dev/null")
 
 
-def test_openvoice_engine_is_available_returns_bool() -> None:
-    """is_available() should return a bool — not raise — even when voice
-    deps + weights aren't installed (typical CI environment)."""
-    engine = voice_engines.get_engine("openvoice")
-    result = engine.is_available()
-    assert isinstance(result, bool)
-
-
-def test_default_engine_falls_back_to_openvoice() -> None:
-    """Until RVC is implemented, default_engine_name() picks openvoice
-    (and it returns a string regardless of whether deps are installed)."""
-    name = voice_engines.default_engine_name()
-    assert name in ("openvoice", "rvc")
+def test_default_engine_is_rvc() -> None:
+    """Sprint 14e: default_engine_name() always returns rvc."""
+    assert voice_engines.default_engine_name() == "rvc"
 
 
 def test_voice_engine_protocol_runtime_check() -> None:

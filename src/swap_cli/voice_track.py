@@ -35,20 +35,23 @@ if TYPE_CHECKING:
 
 
 SAMPLE_RATE = 16_000
-# Mic delivers 250 ms blocks. We then BUFFER into 1 s windows with 50%
-# overlap and run the converter once per window. Output uses linear
-# crossfade between adjacent windows so words don't get cut mid-syllable
-# at chunk boundaries (the cause of "clean but garbled" output).
+# Mic delivers 250 ms blocks. We then BUFFER into 2 s windows and emit
+# 1 s hops. Per the upstream RVC realtime guide:
+#   "Sample length 0.5–1.0s. Lower = less latency but worse quality and
+#    more artifacts. Start at 1.0s, push down only if you need to."
+# Sprint 14e bumped HOP from 500 ms → 1.0 s (quality > latency).
 #
-# Latency: ~1 s from speaking → being heard. Acceptable for a voice call.
+# Latency: ~1.5–2 s from speaking → being heard. Acceptable for a voice
+# call; lower it later if users complain.
 CHUNK_SAMPLES = 4_000  # 250 ms — sounddevice callback granularity
-WINDOW_SAMPLES = 16_000  # 1 s — converter input window
-HOP_SAMPLES = 8_000  # 500 ms — slide / output rate
+WINDOW_SAMPLES = 32_000  # 2 s — converter input window (1 s context + 1 s output)
+HOP_SAMPLES = 16_000  # 1.0 s — slide / output rate
 # SOLA (Synchronized Overlap-Add) — borrowed from w-okada/voice-changer.
 # Cross-correlate the new converted chunk's leading region with the saved
 # tail to find the optimal alignment offset, then crossfade THERE. Beats
 # linear crossfade because it phase-aligns the chunks (no chorus artifact).
-CROSSFADE_SAMPLES = 2_000  # 125 ms blend region
+# 14e: bumped crossfade to 0.15 s per the RVC guide's sweet-spot range.
+CROSSFADE_SAMPLES = 2_400  # 150 ms blend region
 SOLA_SEARCH_SAMPLES = 200  # ~12 ms search range
 WARM_UP_SECONDS = 3.0
 WARM_UP_TARGET_SAMPLES = int(SAMPLE_RATE * WARM_UP_SECONDS)
@@ -129,7 +132,7 @@ class VoiceTrackOptions:
     play_through_speakers: bool = False
     # Sprint 14b.2.a: which engine handles streaming inference. Defaults
     # to OpenVoice (current path); RVC engine lands in 14b.2.b.
-    engine_name: str = "openvoice"
+    engine_name: str = "rvc"
 
 
 class VoiceTrack:
@@ -198,7 +201,7 @@ class VoiceTrack:
         import sounddevice as sd  # type: ignore[import-not-found]
 
         # Pre-load the model on the asyncio loop (a few seconds on cold cache).
-        self._on_status("Voice: loading OpenVoice…")
+        self._on_status("Voice: loading model…")
         try:
             await asyncio.to_thread(self._converter.ensure_loaded)
         except Exception as err:  # noqa: BLE001

@@ -3,6 +3,9 @@
 Pure-Python — never imports torch / sounddevice. Uses `importlib.util.find_spec`
 so it works even before the `[voice]` extra is installed. The Enable Voice
 modal in the GUI calls this to decide what to show the user.
+
+Sprint 14e: OpenVoice removed. Voice = RVC only. Adds ffmpeg + Visual C++
+Build Tools preflight checks per the user-supplied RVC setup guide.
 """
 
 from __future__ import annotations
@@ -18,17 +21,12 @@ from pathlib import Path
 from platformdirs import user_data_dir
 
 APP_NAME = "swap-cli"
-OPENVOICE_WEIGHTS_DIRNAME = "openvoice-v2"
 RVC_MODELS_DIRNAME = "rvc"
 
 
 def models_dir() -> Path:
-    """Where OpenVoice/RVC weights live once `swap voices install` runs."""
+    """Where RVC weights live once `swap voices install` runs."""
     return Path(user_data_dir(APP_NAME)) / "models"
-
-
-def openvoice_weights_dir() -> Path:
-    return models_dir() / OPENVOICE_WEIGHTS_DIRNAME
 
 
 def rvc_models_dir() -> Path:
@@ -47,12 +45,19 @@ class Check:
 class PrereqResult:
     gpu: Check
     deps_installed: Check
-    weights: Check
+    ffmpeg: Check
+    build_tools: Check
     audio_cable: Check
 
     @property
     def all_ok(self) -> bool:
-        return self.gpu.ok and self.deps_installed.ok and self.weights.ok and self.audio_cable.ok
+        return (
+            self.gpu.ok
+            and self.deps_installed.ok
+            and self.ffmpeg.ok
+            and self.build_tools.ok
+            and self.audio_cable.ok
+        )
 
     @property
     def gpu_blocked(self) -> bool:
@@ -64,7 +69,8 @@ def check_all() -> PrereqResult:
     return PrereqResult(
         gpu=_check_gpu(),
         deps_installed=_check_deps(),
-        weights=_check_weights(),
+        ffmpeg=_check_ffmpeg(),
+        build_tools=_check_build_tools(),
         audio_cable=_check_audio_cable(),
     )
 
@@ -76,31 +82,24 @@ def _check_gpu() -> Check:
     """Detect a supported GPU without importing torch.
 
     On Windows / Linux: shell out to `nvidia-smi` and check return code.
-    On macOS: any Apple Silicon machine (arm64) gets MPS — assume yes.
-    Anything else: blocked.
+    On macOS: Apple Silicon CPU is too slow for live RVC streaming
+    (per the upstream RVC project — PyTorch 2.6 + fairseq + MPS combo
+    is broken). Mac is honestly not supported for v1.
     """
     if sys.platform == "darwin":
         if platform.machine() == "arm64":
-            # rvc-python doesn't reliably support MPS — PyTorch 2.6 + fairseq
-            # checkpoint loading + MPS is broken upstream
-            # (RVC-Project/Retrieval-based-Voice-Conversion-WebUI#767). The
-            # safe path on Apple Silicon today is CPU single-threaded, which
-            # is too slow for live RVC streaming on a typical M1/M2.
-            #
-            # OpenVoice tone-color extraction (used by `swap voices add`)
-            # runs fine on CPU in ~5 s — that path stays usable.
             return Check(
                 ok=False,
                 label="Apple Silicon — CPU only",
                 hint=(
-                    "RVC live streaming may be too slow on M1/M2 CPUs. "
-                    "OpenVoice voice-add still works."
+                    "RVC live streaming requires NVIDIA. "
+                    "Mac CPU path is too slow for real-time."
                 ),
             )
         return Check(
             ok=False,
             label="Intel Mac",
-            hint="Voice requires Apple Silicon or NVIDIA GPU.",
+            hint="Voice requires NVIDIA RTX 3060+ on Windows/Linux.",
         )
 
     nvidia_smi = shutil.which("nvidia-smi")
@@ -120,8 +119,8 @@ def _check_gpu() -> Check:
 
     return Check(
         ok=False,
-        label="No supported GPU",
-        hint="Voice requires NVIDIA RTX 3060+ or Apple Silicon.",
+        label="No NVIDIA GPU",
+        hint="Voice requires NVIDIA RTX 3060+.",
     )
 
 
@@ -131,23 +130,17 @@ def _check_gpu() -> Check:
 def _check_deps() -> Check:
     """True iff every voice-cloning runtime import is available.
 
-    `swap voices install` short-circuits when this returns ok — so the
-    list MUST mirror everything install_voice_deps() actually pulls in.
-    Specifically: OpenVoice (tone-color extraction) AND rvc-python +
-    fairseq (RVC streaming). If we omit one, users on a partial install
-    get '✓ already installed' even though half the engines won't load.
-
-    voice_model.voice_deps_present() is OpenVoice-only and intentionally
-    stays narrower — it gates only the OpenVoice runtime.
+    `swap voices install` short-circuits when this returns ok, so this
+    list MUST mirror everything install_voice_deps() pulls in. Sprint 14e
+    drops OpenVoice — voice path is now RVC-only.
     """
     required = (
         "torch",
         "torchaudio",
         "sounddevice",
         "librosa",
-        "openvoice",
-        "rvc_python",  # Sprint 14d: noticed missing rvc-python after OpenVoice install
-        "fairseq",     # rvc-python imports fairseq for HuBERT loader
+        "rvc_python",
+        "fairseq",  # rvc-python imports fairseq for HuBERT loader
     )
     missing = [m for m in required if importlib.util.find_spec(m) is None]
     if not missing:
@@ -159,20 +152,53 @@ def _check_deps() -> Check:
     )
 
 
-# ── OpenVoice weights ─────────────────────────────────────────────────────
+# ── ffmpeg on PATH ────────────────────────────────────────────────────────
 
 
-def _check_weights() -> Check:
-    weights = openvoice_weights_dir()
-    # We don't validate file contents here — too expensive for the modal.
-    # `swap voices install` writes a sentinel file `installed.ok` on success.
-    sentinel = weights / "installed.ok"
-    if sentinel.exists():
-        return Check(ok=True, label=f"weights ready ({weights})")
+def _check_ffmpeg() -> Check:
+    """Half the 'file failed to load' errors in RVC trace to missing
+    ffmpeg. Detect early."""
+    if shutil.which("ffmpeg") is None:
+        if sys.platform == "win32":
+            hint = "winget install Gyan.FFmpeg  (or grab from https://gyan.dev/ffmpeg/)"
+        elif sys.platform == "darwin":
+            hint = "brew install ffmpeg"
+        else:
+            hint = "sudo apt install ffmpeg  (or your distro's equivalent)"
+        return Check(ok=False, label="ffmpeg not on PATH", hint=hint)
+    return Check(ok=True, label="ffmpeg on PATH")
+
+
+# ── Visual C++ Build Tools (Windows-only) ─────────────────────────────────
+
+
+def _check_build_tools() -> Check:
+    """Some RVC deps (pyworld, faiss-cpu when no wheel) compile from
+    source on Windows — that needs Visual C++ Build Tools. Cryptic
+    wheel-build failures otherwise. Linux/Mac use system gcc/clang
+    (xcode-select on Mac is checked separately in install_voice_deps).
+    """
+    if sys.platform != "win32":
+        return Check(ok=True, label="not applicable on this platform")
+
+    # Detect by looking for the standard install path. Microsoft puts
+    # Build Tools (MSVC) under VS BuildTools / VS Installer.
+    candidates = [
+        Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools"),
+        Path("C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools"),
+        Path("C:/Program Files/Microsoft Visual Studio/2022/BuildTools"),
+        Path("C:/Program Files/Microsoft Visual Studio/2022/Community"),
+    ]
+    if any(p.exists() for p in candidates):
+        return Check(ok=True, label="Visual C++ Build Tools installed")
     return Check(
         ok=False,
-        label="OpenVoice weights not downloaded (~5 GB)",
-        hint="run `swap voices install`",
+        label="Visual C++ Build Tools not detected",
+        hint=(
+            "Some RVC deps build from source. Install from "
+            "https://visualstudio.microsoft.com/visual-cpp-build-tools/ "
+            "(check 'Desktop development with C++')."
+        ),
     )
 
 
@@ -184,9 +210,6 @@ def _check_audio_cable() -> Check:
     into Zoom / OBS / Discord. Hint depends on platform.
     """
     if sys.platform == "darwin":
-        # BlackHole installs a kext that registers an audio device named
-        # "BlackHole 2ch" (or 16ch). Cheapest detect: look in /Library/Audio
-        # for the driver bundle.
         if Path("/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver").exists():
             return Check(ok=True, label="BlackHole 2ch installed")
         if Path("/Library/Audio/Plug-Ins/HAL/BlackHole16ch.driver").exists():
@@ -198,8 +221,6 @@ def _check_audio_cable() -> Check:
         )
 
     if sys.platform == "win32":
-        # VB-Cable installs as DLLs under Program Files; cheapest detect is
-        # checking for the driver folder.
         candidates = [
             Path("C:/Program Files/VB/CABLE"),
             Path("C:/Program Files (x86)/VB/CABLE"),
