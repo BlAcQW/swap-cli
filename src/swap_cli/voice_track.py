@@ -40,6 +40,14 @@ SAMPLE_RATE = 16_000
 # noise, keyboard taps — saves 1-2.4 s of inference cost per silent
 # chunk on a 4060 mobile.
 SILENT_THRESHOLD_RMS = 0.01
+# Sprint 14j: latency reduction. Hop dictates speak-to-hear delay
+# (you don't hear yourself until a full HOP of mic data has arrived).
+# Window stays large enough to give RVC pitch tracking context.
+# Old: hop=1.0s window=2.0s → ~2s total latency.
+# New: hop=0.5s window=1.5s → ~1.0-1.2s total latency.
+# Constraint: convert(window) time must stay below HOP duration on
+# the user's GPU, else we drop chunks. With Fast mode + soft-asmr on
+# a 4060 Mobile this should hold (~400-700ms inference).
 # Mic delivers 250 ms blocks. We then BUFFER into 2 s windows and emit
 # 1 s hops. Per the upstream RVC realtime guide:
 #   "Sample length 0.5–1.0s. Lower = less latency but worse quality and
@@ -49,14 +57,14 @@ SILENT_THRESHOLD_RMS = 0.01
 # Latency: ~1.5–2 s from speaking → being heard. Acceptable for a voice
 # call; lower it later if users complain.
 CHUNK_SAMPLES = 4_000  # 250 ms — sounddevice callback granularity
-WINDOW_SAMPLES = 32_000  # 2 s — converter input window (1 s context + 1 s output)
-HOP_SAMPLES = 16_000  # 1.0 s — slide / output rate
+WINDOW_SAMPLES = 24_000  # 1.5 s — converter input window (1 s context + 0.5 s emit)
+HOP_SAMPLES = 8_000  # 0.5 s — slide / output rate (was 1.0 s in 14e)
 # SOLA (Synchronized Overlap-Add) — borrowed from w-okada/voice-changer.
 # Cross-correlate the new converted chunk's leading region with the saved
 # tail to find the optimal alignment offset, then crossfade THERE. Beats
 # linear crossfade because it phase-aligns the chunks (no chorus artifact).
-# 14e: bumped crossfade to 0.15 s per the RVC guide's sweet-spot range.
-CROSSFADE_SAMPLES = 2_400  # 150 ms blend region
+# 14j: crossfade scales with hop. 100ms = w-okada's lower-bound sweet spot.
+CROSSFADE_SAMPLES = 1_600  # 100 ms blend region
 SOLA_SEARCH_SAMPLES = 200  # ~12 ms search range
 WARM_UP_SECONDS = 3.0
 WARM_UP_TARGET_SAMPLES = int(SAMPLE_RATE * WARM_UP_SECONDS)
@@ -252,6 +260,18 @@ class VoiceTrack:
             print(f"[voice_track] model load failed: {err}", flush=True)
             return
         print("[voice_track] model loaded", flush=True)
+
+        # Sprint 14j: print the latency budget so the user can correlate
+        # what they hear with what we expect.
+        hop_ms = (HOP_SAMPLES / SAMPLE_RATE) * 1000
+        win_ms = (WINDOW_SAMPLES / SAMPLE_RATE) * 1000
+        cf_ms = (CROSSFADE_SAMPLES / SAMPLE_RATE) * 1000
+        print(
+            f"[voice_track] latency budget: hop={hop_ms:.0f}ms (speak-to-hear minimum), "
+            f"window={win_ms:.0f}ms, crossfade={cf_ms:.0f}ms. "
+            f"Convert time must stay under {hop_ms:.0f}ms to avoid drops.",
+            flush=True,
+        )
 
         # Sprint 14i: apply fast mode (skip Faiss retrieval) if requested.
         if self.opts.fast and hasattr(self._converter, "set_index_rate"):
@@ -455,9 +475,10 @@ class VoiceTrack:
                         flag = ""
                         if win_rms > 1e-4 and out_rms < 1e-5:
                             flag = "  ⚠ INPUT HAS AUDIO BUT CONVERTER RETURNED SILENCE"
-                        elif convert_ms > 1500:
+                        elif convert_ms > (HOP_SAMPLES / SAMPLE_RATE) * 1000:
+                            hop_ms = (HOP_SAMPLES / SAMPLE_RATE) * 1000
                             flag = (
-                                f"  ⚠ SLOW: {convert_ms:.0f}ms > 1000ms hop, "
+                                f"  ⚠ SLOW: {convert_ms:.0f}ms > {hop_ms:.0f}ms hop, "
                                 "queue will drop chunks"
                             )
                         tag = "FIRST" if ticks == 0 else f"#{ticks + 1}"
