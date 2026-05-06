@@ -11,13 +11,17 @@ Sprint 14e: OpenVoice removed. Voice path is RVC-only.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
+from .rvc_catalog import CatalogEntry
 from .voice_library import (
     Voice,
     delete_user_voice,
@@ -280,3 +284,84 @@ def rvc_index_path_for(voice: Voice) -> Path | None:
         return None
     index_files = list(model_dir.glob("*.index"))
     return index_files[0] if index_files else None
+
+
+# ── Catalog download (Sprint 14g) ─────────────────────────────────────────
+
+
+def download_catalog_voice(
+    entry: CatalogEntry,
+    on_progress: Callable[[str, int, int], None] | None = None,
+) -> Voice:
+    """Download a catalog voice from our GH release, verify SHA256, register.
+
+    on_progress(filename, bytes_so_far, total_bytes) fires periodically
+    while downloading. Pass None to skip progress reporting.
+
+    Reuses add_rvc_voice() for the final copy + Voice JSON write so the
+    on-disk layout is identical whether the user came in via add-rvc or
+    download <slug>.
+
+    Raises:
+        RuntimeError: if SHA256 doesn't match (download corrupted or the
+            catalog entry is wrong — both worth surfacing loudly).
+        httpx.HTTPError: on network/HTTP failures (caller wraps for UX).
+    """
+    import httpx  # base dep; importing inline keeps it out of the module load path
+
+    with tempfile.TemporaryDirectory(prefix=f"swap-catalog-{entry.slug}-") as tmp:
+        tmp_dir = Path(tmp)
+        pth_path = _stream_with_sha(
+            url=entry.pth_url,
+            dest=tmp_dir / f"{entry.slug}.pth",
+            expected_sha256=entry.pth_sha256,
+            on_progress=on_progress,
+        )
+        index_path: Path | None = None
+        if entry.index_url is not None and entry.index_sha256 is not None:
+            index_path = _stream_with_sha(
+                url=entry.index_url,
+                dest=tmp_dir / f"{entry.slug}.index",
+                expected_sha256=entry.index_sha256,
+                on_progress=on_progress,
+            )
+
+        # Hand off to the existing add-rvc path; copies into the user
+        # data dir and writes the Voice JSON.
+        return add_rvc_voice(pth_path, name=entry.name, index_path=index_path)
+
+
+def _stream_with_sha(
+    url: str,
+    dest: Path,
+    expected_sha256: str,
+    on_progress: Callable[[str, int, int], None] | None,
+) -> Path:
+    """Stream a URL to dest, computing SHA256 as we go. Raises on mismatch."""
+    import httpx
+
+    digest = hashlib.sha256()
+    bytes_read = 0
+    with httpx.stream(
+        "GET", url, follow_redirects=True, timeout=httpx.Timeout(60.0, connect=10.0)
+    ) as resp:
+        resp.raise_for_status()
+        total = int(resp.headers.get("content-length", 0))
+        with dest.open("wb") as fh:
+            for chunk in resp.iter_bytes(chunk_size=1 << 20):  # 1 MB
+                fh.write(chunk)
+                digest.update(chunk)
+                bytes_read += len(chunk)
+                if on_progress is not None:
+                    on_progress(dest.name, bytes_read, total)
+
+    actual = digest.hexdigest()
+    if actual != expected_sha256:
+        # Wipe the bad file so a retry starts clean.
+        dest.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"SHA256 mismatch for {dest.name}: "
+            f"expected {expected_sha256[:12]}…, got {actual[:12]}…. "
+            "Download corrupted; re-run `swap voices download` to retry."
+        )
+    return dest

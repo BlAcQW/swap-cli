@@ -374,14 +374,32 @@ def _run_voice_session(
 
 
 @voices_app.command("install")
-def voices_install() -> None:
+def voices_install(
+    starter: Annotated[
+        str | None,
+        typer.Option(
+            "--starter",
+            help="Auto-download a specific catalog voice after install (e.g. soft-asmr).",
+        ),
+    ] = None,
+    no_starter: Annotated[
+        bool,
+        typer.Option(
+            "--no-starter",
+            help="Skip the post-install starter-voice prompt entirely.",
+        ),
+    ] = False,
+) -> None:
     """Install voice deps for the RVC streaming engine.
 
     Sprint 14e: Pulls CUDA-matched PyTorch first (Win/Linux NVIDIA),
     then RVC's runtime deps + rvc-python + fairseq. ~3–5 GB total.
-    No more OpenVoice weight download — voice paths are RVC-only.
+
+    Sprint 14g: After deps install, optionally download a starter voice
+    so users can run `swap gui --voice` immediately. Interactive by
+    default; use --starter <slug> for CI or --no-starter to skip.
     """
-    from . import voice_ops, voice_prereq
+    from . import rvc_catalog, voice_engines, voice_ops, voice_prereq
 
     pre = voice_prereq.check_all()
     if not pre.gpu.ok:
@@ -405,21 +423,104 @@ def voices_install() -> None:
 
     if pre.deps_installed.ok:
         console.print("[green]✓ voice deps already installed.[/green]")
+    else:
+        console.print(
+            "Installing RVC voice stack — CUDA torch, runtime deps, rvc-python, fairseq …"
+        )
+        if not voice_ops.install_voice_deps():
+            err_console.print("[red]pip install failed.[/red]")
+            raise typer.Exit(1)
+        console.print("[green]✓ voice deps installed.[/green]")
+
+    # Sprint 14g: voice deps are in place; offer a starter voice so the
+    # user has something to immediately try.
+    rvc_engine = voice_engines.get_engine("rvc")
+    if rvc_engine.is_ready():
+        # User already has at least one rvc-* voice — nothing to do.
         return
 
-    console.print(
-        "Installing RVC voice stack — CUDA torch, runtime deps, rvc-python, fairseq …"
+    if no_starter:
+        console.print(
+            "\n[dim]No voice registered yet. Browse with `swap voices catalog` "
+            "or run `swap voices download <slug>`.[/dim]"
+        )
+        return
+
+    if starter is not None:
+        entry = rvc_catalog.find(starter)
+        if entry is None:
+            err_console.print(
+                f"[red]Unknown catalog slug '{starter}'.[/red] "
+                "Run [bold]swap voices catalog[/bold] to see options."
+            )
+            raise typer.Exit(1)
+        _download_catalog_entry(entry)
+        return
+
+    # Interactive prompt — only when stdin is a TTY. Piped input skips.
+    if not sys.stdin.isatty():
+        console.print(
+            "\n[dim]No voice registered yet. Run `swap voices catalog` to "
+            "browse, or `swap voices install --starter <slug>` for a non-"
+            "interactive setup.[/dim]"
+        )
+        return
+
+    starter_entry = rvc_catalog.starter()
+    prompt_msg = (
+        f"\n[bold]Download a starter voice?[/bold] "
+        f"({starter_entry.name}, ~{starter_entry.total_size_mb} MB) [Y/n] "
     )
-    if not voice_ops.install_voice_deps():
-        err_console.print("[red]pip install failed.[/red]")
-        raise typer.Exit(1)
-    console.print("[green]✓ voice deps installed.[/green]")
+    answer = typer.prompt(prompt_msg, default="Y", show_default=False).strip().lower()
+    if answer in ("", "y", "yes"):
+        _download_catalog_entry(starter_entry)
+    else:
+        console.print(
+            "[dim]Skipped. Browse with `swap voices catalog` whenever you're ready.[/dim]"
+        )
+
+
+def _download_catalog_entry(entry) -> None:  # type: ignore[no-untyped-def]
+    """Shared helper for the install starter + standalone download command."""
+    from rich.progress import (
+        BarColumn,
+        DownloadColumn,
+        Progress,
+        TextColumn,
+        TimeRemainingColumn,
+        TransferSpeedColumn,
+    )
+
+    from . import voice_ops
+
+    progress = Progress(
+        TextColumn("[bold blue]{task.fields[fname]}[/bold blue]"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    )
+    task_id: dict[str, int] = {}
+
+    def on_progress(fname: str, done: int, total: int) -> None:
+        if fname not in task_id:
+            task_id[fname] = progress.add_task("download", total=total or None, fname=fname)
+        progress.update(task_id[fname], completed=done)
+
+    with progress:
+        try:
+            voice = voice_ops.download_catalog_voice(entry, on_progress=on_progress)
+        except RuntimeError as err:
+            err_console.print(f"[red]{err}[/red]")
+            raise typer.Exit(1) from err
+        except Exception as err:  # noqa: BLE001 — httpx/network failures
+            err_console.print(f"[red]download failed: {err}[/red]")
+            raise typer.Exit(1) from err
 
     console.print(
-        "\n[dim]Next: download an RVC .pth model (e.g. from weights.gg or "
-        "huggingface.co/lj1995/VoiceConversionWebUI), register it with "
-        "`swap voices add-rvc /path/to/model.pth --name X`, then "
-        "`swap gui --voice`.[/dim]"
+        f"[green]✓ Voice ready:[/green] [bold]{voice.name}[/bold] (id: {voice.id})\n"
+        "[dim]Try it with `swap gui --voice`.[/dim]"
     )
 
 
@@ -551,6 +652,63 @@ def voices_remove_rvc(
     else:
         err_console.print(f"[red]No RVC voice matching '{name}'.[/red]")
         raise typer.Exit(1)
+
+
+@voices_app.command("catalog")
+def voices_catalog() -> None:
+    """List curated RVC voices available via `swap voices download`.
+
+    These are mirrored to our GitHub Releases — stable URLs, license-
+    vetted personas (no real people, no copyrighted IP).
+    """
+    from . import rvc_catalog
+
+    table = Table(title="Curated voice catalog", show_header=True, box=None)
+    table.add_column("slug", style="dim")
+    table.add_column("name")
+    table.add_column("size", justify="right")
+    table.add_column("description")
+    for entry in rvc_catalog.CATALOG:
+        starter_marker = " [yellow]★[/yellow]" if entry.slug == rvc_catalog.STARTER_SLUG else ""
+        table.add_row(
+            entry.slug + starter_marker,
+            entry.name,
+            f"{entry.total_size_mb} MB",
+            entry.description,
+        )
+    console.print(table)
+    console.print(
+        f"\n[dim]★ = default starter (smallest). "
+        f"Download with [bold]swap voices download <slug>[/bold].[/dim]"
+    )
+
+
+@voices_app.command("download")
+def voices_download(
+    slug: Annotated[
+        str,
+        typer.Argument(help="Catalog slug — see `swap voices catalog` for options."),
+    ],
+) -> None:
+    """Download a curated RVC voice from our mirror and register it."""
+    from . import rvc_catalog, voice_engines
+
+    rvc_engine = voice_engines.get_engine("rvc")
+    if not rvc_engine.is_available():
+        err_console.print(
+            "[red]RVC isn't installed.[/red] Run [bold]swap voices install[/bold] first."
+        )
+        raise typer.Exit(1)
+
+    entry = rvc_catalog.find(slug)
+    if entry is None:
+        err_console.print(
+            f"[red]Unknown catalog slug '{slug}'.[/red] "
+            "Run [bold]swap voices catalog[/bold] to see options."
+        )
+        raise typer.Exit(1)
+
+    _download_catalog_entry(entry)
 
 
 @voices_app.command("engine")
