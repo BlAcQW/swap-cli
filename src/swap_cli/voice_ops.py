@@ -193,6 +193,52 @@ def install_fairseq_runtime_deps() -> bool:
         return False
 
 
+def is_cuda_torch_available() -> bool:
+    """True iff PyTorch is installed AND its CUDA backend is functional.
+
+    Imports torch (which is fast once installed) and queries
+    torch.cuda.is_available(). Returns False both when torch is missing
+    and when a CPU-only torch was installed on a CUDA-capable machine.
+    """
+    try:
+        import torch  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def reinstall_cuda_torch() -> bool:
+    """Replace CPU-only torch/torchaudio with CUDA-matched wheels.
+
+    Used by `swap voices repair` to fix the common case where a user
+    installed torch via plain `pip install torch` (which on Windows
+    serves the CPU wheel by default) and ended up with rvc-python
+    falling back to CPU on an NVIDIA machine. Sprint 14e's
+    install_voice_deps does this correctly for fresh installs; this
+    helper migrates pre-existing ones.
+
+    No-op on macOS (no CUDA path) and on systems without nvidia-smi
+    (CPU torch is correct in those cases).
+    """
+    if not _is_nvidia_platform():
+        return True
+
+    pip = [sys.executable, "-m", "pip"]
+    try:
+        subprocess.run(pip + ["uninstall", "-y", "torch", "torchaudio"], check=False)
+        subprocess.check_call(
+            pip
+            + ["install", "--index-url", TORCH_CUDA_INDEX]
+            + list(TORCH_CUDA_PACKAGES)
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
 def reinstall_fairseq_from_fork() -> bool:
     """Uninstall the user's existing fairseq and reinstall from
     One-sixth/fairseq. Used by `swap voices repair` to migrate users

@@ -528,25 +528,42 @@ def _download_catalog_entry(entry) -> None:  # type: ignore[no-untyped-def]
 def voices_repair() -> None:
     """Migrate existing voice installs to the working fairseq fork.
 
-    Three fixes (idempotent — safe to re-run):
-      1. Reinstall fairseq from One-sixth/fairseq — RVC-friendly fork
+    Four fixes (idempotent — safe to re-run):
+      1. Replace CPU-only torch with CUDA-matched wheels on NVIDIA boxes.
+         Without this, rvc-python falls back to CPU on a 4070+ and
+         streaming is too slow.
+      2. Reinstall fairseq from One-sixth/fairseq — RVC-friendly fork
          with dataclass + omegaconf fixes baked in. Replaces the broken
          facebookresearch fairseq main that pre-14g.4 installs picked up.
-      2. Pip-install fairseq's runtime deps (hydra-core, bitarray, regex,
+      3. Pip-install fairseq's runtime deps (hydra-core, bitarray, regex,
          sacrebleu, scikit-learn, etc.) that --no-deps fairseq doesn't
          pull. Pre-14g.3 installs missed these.
-      3. Patch fairseq's mutable dataclass defaults if any are still
+      4. Patch fairseq's mutable dataclass defaults if any are still
          present (no-op on the One-sixth fork; safety belt for users who
          installed manually).
 
     Run this if voice sessions fail with anything resembling:
+        rvc_python.configs.config | No supported Nvidia GPU found
         ModuleNotFoundError: No module named 'hydra'
         ValueError: mutable default ... for field common is not allowed
         Object of unsupported type: '_MISSING_TYPE'
     """
     from . import voice_ops
 
-    console.print("[bold]Step 1/3[/bold]: reinstalling fairseq from One-sixth fork …")
+    console.print("[bold]Step 1/4[/bold]: replacing CPU torch with CUDA wheels …")
+    if not voice_ops.reinstall_cuda_torch():
+        err_console.print(
+            "[red]CUDA torch install failed — see error above.[/red] "
+            "If you don't have an NVIDIA GPU this step is skipped."
+        )
+        raise typer.Exit(1)
+    if voice_ops.is_cuda_torch_available():
+        console.print("[green]✓ CUDA torch installed.[/green]")
+    else:
+        # Skipped (no nvidia-smi) or genuinely unavailable; not an error.
+        console.print("[dim]No CUDA platform detected — skipped.[/dim]")
+
+    console.print("[bold]Step 2/4[/bold]: reinstalling fairseq from One-sixth fork …")
     if not voice_ops.reinstall_fairseq_from_fork():
         err_console.print(
             "[red]fairseq reinstall failed — see error above.[/red]"
@@ -554,7 +571,7 @@ def voices_repair() -> None:
         raise typer.Exit(1)
     console.print("[green]✓ fairseq from One-sixth/fairseq installed.[/green]")
 
-    console.print("[bold]Step 2/3[/bold]: installing fairseq runtime deps …")
+    console.print("[bold]Step 3/4[/bold]: installing fairseq runtime deps …")
     if not voice_ops.install_fairseq_runtime_deps():
         err_console.print(
             "[red]pip install failed — see error above.[/red] "
@@ -563,7 +580,7 @@ def voices_repair() -> None:
         raise typer.Exit(1)
     console.print("[green]✓ fairseq runtime deps in place.[/green]")
 
-    console.print("[bold]Step 3/3[/bold]: patching fairseq dataclass defaults …")
+    console.print("[bold]Step 4/4[/bold]: patching fairseq dataclass defaults …")
     if not voice_ops.patch_fairseq_dataclass_defaults():
         err_console.print(
             "[red]Patch failed — see error above.[/red] "
@@ -937,6 +954,12 @@ async def _doctor() -> None:
             hint = "sudo apt install ffmpeg"
         table.add_row("ffmpeg on PATH", f"[red]✗ {hint}[/red]")
 
+    # PyTorch CUDA — only relevant on a machine with an NVIDIA GPU.
+    # Common failure: the user pip-installed torch from PyPI default,
+    # got the CPU wheel, and then RVC silently falls back to CPU. Surface
+    # it explicitly so they notice without running a session.
+    table.add_row("torch CUDA", _torch_cuda_label())
+
     # macOS-only: customtkinter needs Tcl/Tk >= 8.6.9. The system Python
     # ships 8.5.9 which fails silently or renders broken windows. Surface
     # this here so users know to switch to python.org Python or
@@ -975,6 +998,35 @@ def _import_ok(name: str) -> str:
         __import__(name)
         return "[green]✓[/green]"
     except ImportError as err:
+        return f"[red]✗ {err}[/red]"
+
+
+def _torch_cuda_label() -> str:
+    """Return a doctor-row label for torch's CUDA backend.
+
+    On NVIDIA boxes: green if torch built with CUDA (and the GPU is
+    visible), red with an explicit fix hint otherwise. On macOS / non-
+    NVIDIA Linux: dim "n/a" — CPU torch is correct.
+    """
+    if shutil.which("nvidia-smi") is None:
+        # No NVIDIA GPU on this box; CPU torch is the right answer.
+        return "[dim]n/a (no NVIDIA GPU)[/dim]"
+    try:
+        import torch  # type: ignore[import-not-found]
+    except ImportError:
+        return "[dim]not installed (run `swap voices install`)[/dim]"
+    try:
+        if not torch.cuda.is_available():
+            return (
+                "[red]✗ CPU-only torch on a CUDA-capable machine — "
+                "run `swap voices repair`[/red]"
+            )
+        try:
+            name = torch.cuda.get_device_name(0)
+        except Exception:  # noqa: BLE001
+            name = "CUDA device"
+        return f"[green]✓ {name}[/green]"
+    except Exception as err:  # noqa: BLE001
         return f"[red]✗ {err}[/red]"
 
 
