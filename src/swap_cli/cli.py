@@ -524,6 +524,34 @@ def _download_catalog_entry(entry) -> None:  # type: ignore[no-untyped-def]
     )
 
 
+@voices_app.command("repair")
+def voices_repair() -> None:
+    """Apply post-install patches for known dependency bugs.
+
+    Currently fixes one issue: fairseq's mutable dataclass defaults
+    that crash on Python 3.11+ (fairseq#5634, repo archived). Run this
+    if your voice session fails with:
+
+        ValueError: mutable default <class 'fairseq.dataclass.configs.
+        CommonConfig'> for field common is not allowed: use default_factory
+
+    Idempotent — safe to run repeatedly.
+    """
+    from . import voice_ops
+
+    if voice_ops.patch_fairseq_dataclass_defaults():
+        console.print(
+            "[green]✓ fairseq dataclass patch applied (or already in place).[/green]\n"
+            "[dim]Retry `swap gui --voice` or `swap voice -v <name>`.[/dim]"
+        )
+    else:
+        err_console.print(
+            "[red]Patch failed — see error above.[/red] "
+            "If fairseq isn't installed, run [bold]swap voices install[/bold] first."
+        )
+        raise typer.Exit(1)
+
+
 @voices_app.command("list")
 def voices_list() -> None:
     """List the user-added RVC voices."""

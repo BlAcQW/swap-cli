@@ -120,6 +120,16 @@ def install_voice_deps() -> bool:
         subprocess.check_call(pip + list(VOICE_PACKAGES))
         subprocess.check_call(pip + ["--no-deps", RVC_PYTHON_SPEC])
         subprocess.check_call(pip + ["--no-deps", FAIRSEQ_GIT_URL])
+        # Post-install: patch fairseq for Python 3.11+ dataclass strict mode.
+        # Returns False on patch failure so the user sees the install as failed
+        # rather than getting a runtime error later.
+        if not patch_fairseq_dataclass_defaults():
+            print(
+                "[voice_ops] fairseq dataclass patch failed — "
+                "voice will fail at runtime. See `swap doctor`.",
+                flush=True,
+            )
+            return False
         return True
     except subprocess.CalledProcessError:
         return False
@@ -132,6 +142,78 @@ def _is_nvidia_platform() -> bool:
     if sys.platform == "darwin":
         return False
     return shutil.which("nvidia-smi") is not None
+
+
+def patch_fairseq_dataclass_defaults() -> bool:
+    """Patch fairseq's `dataclass/configs.py` for Python 3.11+ compat.
+
+    Why: fairseq#5634 — Python 3.11+ rejects mutable dataclass defaults.
+    The archived fairseq main branch defines `FairseqConfig` like:
+
+        @dataclass
+        class FairseqConfig(FairseqDataclass):
+            common: CommonConfig = CommonConfig()       # ❌ rejected
+            common_eval: CommonEvalConfig = CommonEvalConfig()
+            ... (11 such lines)
+
+    Running `import fairseq` on 3.11+ raises:
+        ValueError: mutable default <class 'fairseq.dataclass.configs.CommonConfig'>
+        for field common is not allowed: use default_factory
+
+    Repo is archived (March 2026) — no upstream fix coming. We rewrite
+    those 11 lines in-place to use `field(default_factory=...)`. The
+    `field` import is already at the top of the file, so no other edits
+    are needed.
+
+    Idempotent: re-running detects the already-patched form and no-ops.
+    Returns True if the patch was applied, was already applied, or
+    fairseq isn't installed (nothing to do).
+    """
+    import importlib.util
+    import re
+
+    try:
+        spec = importlib.util.find_spec("fairseq.dataclass.configs")
+    except (ModuleNotFoundError, ImportError):
+        # fairseq parent package not installed; nothing to patch.
+        return True
+    if spec is None or spec.origin is None:
+        return True
+
+    configs_path = Path(spec.origin)
+    try:
+        src = configs_path.read_text(encoding="utf-8")
+    except OSError as err:
+        print(f"[voice_ops] cannot read {configs_path}: {err}", flush=True)
+        return False
+
+    # Pattern matches:  <whitespace><field>: <Type>Config = <Type>Config()
+    # Captures the type name twice, asserts they match. Idempotent because
+    # already-patched lines use `field(default_factory=...)` which won't
+    # match `= <Type>()` exactly.
+    pattern = re.compile(
+        r"^(\s*\w+: ([A-Z]\w*Config)) = \2\(\)$",
+        re.MULTILINE,
+    )
+    new_src, count = pattern.subn(
+        lambda m: f"{m.group(1)} = field(default_factory={m.group(2)})",
+        src,
+    )
+    if count == 0:
+        # Already patched, or upstream changed shape. Either way, no-op.
+        return True
+
+    try:
+        configs_path.write_text(new_src, encoding="utf-8")
+    except OSError as err:
+        print(f"[voice_ops] cannot write {configs_path}: {err}", flush=True)
+        return False
+    print(
+        f"[voice_ops] patched {count} mutable defaults in fairseq configs.py "
+        "(Python 3.11+ compat)",
+        flush=True,
+    )
+    return True
 
 
 # ── Library/user voice operations ─────────────────────────────────────────
