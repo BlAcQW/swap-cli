@@ -25,6 +25,10 @@ dependencies = [
     # Friendly camera names on Windows ("Logitech BRIO" instead of "Camera 1").
     # Wraps DirectShow's filter list — Windows-only.
     "pygrabber>=0.2 ; sys_platform == 'win32'",
+    # Virtual camera output (Sprint 14k). ~30 KB pure-Python wrapper around
+    # OBS Virtual Camera (Win/Mac) + v4l2loopback (Linux). Driver itself is
+    # installed out-of-band (user runs OBS Studio installer once).
+    "pyvirtualcam>=0.13",
 ]
 
 [project.optional-dependencies]

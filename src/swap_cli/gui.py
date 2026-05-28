@@ -127,6 +127,17 @@ class SwapGUI(ctk.CTk):
             opts, text="Record to MP4", variable=self._record_var
         ).grid(row=0, column=1, sticky="w", pady=4)
 
+        # Sprint 14k: virtual camera output. When on, Zoom/Meet/Discord
+        # see the deepfake as a camera device ("OBS Virtual Camera") —
+        # no OBS app to open, no manual switching. Default on; user can
+        # disable for screen-recording / preview-only sessions.
+        self._vcam_var = tk.BooleanVar(value=True)
+        ctk.CTkSwitch(
+            opts,
+            text="Output to virtual camera",
+            variable=self._vcam_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+
         # Model selector. Decart fixes width/height/fps per model — we display
         # the native dimensions next to each option so the user knows what
         # they're getting. There is no orientation knob: the SDK only accepts
@@ -495,6 +506,7 @@ class SwapGUI(ctk.CTk):
             reference_voice=voice_id,
             microphone_device=mic_device,
             voice_output_device=out_device,
+            virtual_camera=bool(self._vcam_var.get()) if hasattr(self, "_vcam_var") else True,
         )
 
         # Persist the voice id so next launch defaults to it.

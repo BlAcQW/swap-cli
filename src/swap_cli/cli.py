@@ -183,6 +183,17 @@ def run(
             hidden=True,
         ),
     ] = False,
+    vcam: Annotated[
+        bool,
+        typer.Option(
+            "--vcam/--no-vcam",
+            help=(
+                "Push frames to OBS Virtual Camera so Zoom/Meet/Discord "
+                "see swap as a camera device — no OBS app needed. "
+                "Requires OBS Studio installed (driver only)."
+            ),
+        ),
+    ] = True,
 ) -> None:
     """Open a realtime Decart session and stream until you press Q."""
     cfg = config.load()
@@ -215,6 +226,7 @@ def run(
         model_name=model_name,
         camera_device=device,
         record=record,
+        virtual_camera=vcam,
     )
 
     console.print(
@@ -1063,6 +1075,17 @@ async def _doctor() -> None:
         table.add_row(
             "rvc base models",
             f"[yellow]⚠ {rvc_check.label} — {rvc_check.hint}[/yellow]",
+        )
+
+    # Virtual camera driver (Sprint 14k) — when present, swap can stream
+    # the deepfake straight into Zoom/Meet/Discord without OBS open.
+    vcam_check = voice_prereq._check_obs_vcam()
+    if vcam_check.ok:
+        table.add_row("virtual camera", f"[green]✓ {vcam_check.label}[/green]")
+    else:
+        table.add_row(
+            "virtual camera",
+            f"[yellow]⚠ {vcam_check.label} — {vcam_check.hint}[/yellow]",
         )
 
     # macOS-only: customtkinter needs Tcl/Tk >= 8.6.9. The system Python

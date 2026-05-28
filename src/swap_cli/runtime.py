@@ -50,6 +50,10 @@ class RunOptions:
     reference_voice: str | None = None  # voice id (library) or path to WAV/MP3
     microphone_device: int | None = None  # sounddevice mic index
     voice_output_device: int | None = None  # virtual cable index for routing
+    # Sprint 14k: also push Decart frames to the OBS Virtual Camera driver
+    # so video-call apps see the deepfake as a camera device. Default off
+    # so legacy users / CI without the driver aren't surprised.
+    virtual_camera: bool = False
 
 
 async def run_session(opts: RunOptions) -> None:
@@ -111,6 +115,7 @@ async def run_session(opts: RunOptions) -> None:
                             record=opts.record,
                             quit_event=quit_event,
                             display_box=display_box,
+                            virtual_camera=opts.virtual_camera,
                         ),
                         initial_state=ModelState(
                             prompt=Prompt(text=opts.prompt, enhance=True),
@@ -225,6 +230,7 @@ def _on_remote_stream(
     record: Path | None,
     quit_event: asyncio.Event,
     display_box: list[Display | None],
+    virtual_camera: bool = False,
 ) -> None:
     record_path = record if record is not None else None
     if record is not None and not record.is_absolute():
@@ -236,6 +242,7 @@ def _on_remote_stream(
         track=remote_track,
         record_path=record_path,
         on_quit=quit_event.set,
+        virtual_camera=virtual_camera,
     )
     disp.start()
     display_box[0] = disp

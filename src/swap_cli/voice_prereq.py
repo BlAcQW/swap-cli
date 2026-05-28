@@ -250,6 +250,56 @@ def _check_audio_cable() -> Check:
     return Check(ok=True, label="loopback available via pulseaudio")
 
 
+# ── Virtual camera driver (Sprint 14k) ────────────────────────────────────
+
+
+def _check_obs_vcam() -> Check:
+    """Detect whether an OBS Virtual Camera driver is registered.
+
+    Windows: OBS Studio installs `obs-virtualcam-module64.dll` under its
+    program dir; the DirectShow filter is registered on install. We
+    check the file path because it's cheaper than registry access.
+
+    macOS: OBS installs a CoreMediaIO plugin under /Library/CoreMediaIO.
+
+    Linux: pyvirtualcam uses v4l2loopback. Soft-pass with a hint to
+    `sudo modprobe v4l2loopback` — probing /dev/video* doesn't tell us
+    whether it's a loopback device without ioctl chatter.
+    """
+    if sys.platform == "win32":
+        candidates = [
+            Path("C:/Program Files/obs-studio/bin/64bit/obs-virtualcam-module64.dll"),
+            Path("C:/Program Files (x86)/obs-studio/bin/64bit/obs-virtualcam-module64.dll"),
+        ]
+        if any(p.exists() for p in candidates):
+            return Check(ok=True, label="OBS Virtual Camera installed")
+        return Check(
+            ok=False,
+            label="OBS Virtual Camera not detected",
+            hint="install OBS Studio (https://obsproject.com/download) — "
+            "after install, no need to run the app, the driver is enough",
+        )
+
+    if sys.platform == "darwin":
+        plugin = Path(
+            "/Library/CoreMediaIO/Plug-Ins/DAL/obs-mac-virtualcam.plugin"
+        )
+        if plugin.exists():
+            return Check(ok=True, label="OBS Virtual Camera plugin installed")
+        return Check(
+            ok=False,
+            label="OBS Virtual Camera plugin not detected",
+            hint="install OBS Studio from https://obsproject.com/download",
+        )
+
+    # Linux: soft-pass with hint. Real test is at runtime.
+    return Check(
+        ok=True,
+        label="v4l2loopback assumed (probe at runtime)",
+        hint="if it fails: sudo modprobe v4l2loopback",
+    )
+
+
 # ── RVC base models (hubert + rmvpe) ──────────────────────────────────────
 
 
