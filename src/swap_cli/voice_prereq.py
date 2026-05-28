@@ -254,49 +254,61 @@ def _check_audio_cable() -> Check:
 
 
 def _check_obs_vcam() -> Check:
-    """Detect whether an OBS Virtual Camera driver is registered.
+    """Detect both pieces required for swap → Zoom direct camera output:
+
+      1. The native virtual-camera driver (OS-specific).
+      2. The pyvirtualcam Python wrapper (pip dep).
+
+    Sprint 14m: previously only checked the driver. A user who pulled
+    14k without reinstalling had the driver but no Python lib — silent
+    fallback to preview-only. Now we report the exact missing piece.
 
     Windows: OBS Studio installs `obs-virtualcam-module64.dll` under its
-    program dir; the DirectShow filter is registered on install. We
-    check the file path because it's cheaper than registry access.
-
+    program dir; the DirectShow filter registers on install.
     macOS: OBS installs a CoreMediaIO plugin under /Library/CoreMediaIO.
-
-    Linux: pyvirtualcam uses v4l2loopback. Soft-pass with a hint to
-    `sudo modprobe v4l2loopback` — probing /dev/video* doesn't tell us
-    whether it's a loopback device without ioctl chatter.
+    Linux: pyvirtualcam uses v4l2loopback (soft-pass at probe time).
     """
+    has_pyvcam = importlib.util.find_spec("pyvirtualcam") is not None
+
     if sys.platform == "win32":
         candidates = [
             Path("C:/Program Files/obs-studio/bin/64bit/obs-virtualcam-module64.dll"),
             Path("C:/Program Files (x86)/obs-studio/bin/64bit/obs-virtualcam-module64.dll"),
         ]
-        if any(p.exists() for p in candidates):
-            return Check(ok=True, label="OBS Virtual Camera installed")
+        driver_ok = any(p.exists() for p in candidates)
+    elif sys.platform == "darwin":
+        plugin = Path("/Library/CoreMediaIO/Plug-Ins/DAL/obs-mac-virtualcam.plugin")
+        driver_ok = plugin.exists()
+    else:
+        # Linux: can't cheaply prove v4l2loopback presence; treat driver
+        # as soft-OK and let the runtime open() raise if it isn't there.
+        driver_ok = True
+
+    if driver_ok and has_pyvcam:
+        return Check(
+            ok=True,
+            label="OBS Virtual Camera + pyvirtualcam ready",
+        )
+    if driver_ok and not has_pyvcam:
         return Check(
             ok=False,
-            label="OBS Virtual Camera not detected",
+            label="OBS driver installed, pyvirtualcam Python lib missing",
+            hint="run `pip install --upgrade swap-cli` to pull the dep added in Sprint 14k",
+        )
+    if not driver_ok and has_pyvcam:
+        return Check(
+            ok=False,
+            label="pyvirtualcam ready, OBS Virtual Camera driver missing",
             hint="install OBS Studio (https://obsproject.com/download) — "
-            "after install, no need to run the app, the driver is enough",
+            "no need to run the app, the driver is enough",
         )
-
-    if sys.platform == "darwin":
-        plugin = Path(
-            "/Library/CoreMediaIO/Plug-Ins/DAL/obs-mac-virtualcam.plugin"
-        )
-        if plugin.exists():
-            return Check(ok=True, label="OBS Virtual Camera plugin installed")
-        return Check(
-            ok=False,
-            label="OBS Virtual Camera plugin not detected",
-            hint="install OBS Studio from https://obsproject.com/download",
-        )
-
-    # Linux: soft-pass with hint. Real test is at runtime.
     return Check(
-        ok=True,
-        label="v4l2loopback assumed (probe at runtime)",
-        hint="if it fails: sudo modprobe v4l2loopback",
+        ok=False,
+        label="neither OBS driver nor pyvirtualcam present",
+        hint=(
+            "install OBS Studio (https://obsproject.com/download) AND "
+            "`pip install --upgrade swap-cli`"
+        ),
     )
 
 

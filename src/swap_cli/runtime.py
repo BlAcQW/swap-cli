@@ -14,7 +14,12 @@ from typing import Any, Callable
 from .camera import CameraTrack
 from .display import Display, default_recording_path
 
-CONNECT_TIMEOUT_S = 20.0
+# Sprint 14m: bumped from 20 → 45 s. WebRTC cold-reconnects (user clicks
+# Stop then Live again) routinely take 25–35 s because the OS hasn't yet
+# released the previous session's UDP bindings; Decart's server may also
+# rate-limit rapid reconnect. 45 s covers the common case without making
+# a genuine hang feel infinite.
+CONNECT_TIMEOUT_S = 45.0
 
 
 def _noop_status(_msg: str) -> None:
@@ -126,8 +131,14 @@ async def run_session(opts: RunOptions) -> None:
             )
         except asyncio.TimeoutError as exc:
             raise RuntimeError(
-                f"Decart connection timed out after {CONNECT_TIMEOUT_S:.0f}s. "
-                "Check your API key and that UDP traffic is allowed by your firewall."
+                f"Decart connection timed out after {CONNECT_TIMEOUT_S:.0f}s.\n"
+                "Common causes:\n"
+                "  • You just ended a previous session — wait 15s before "
+                "retrying so Decart frees the WebRTC port.\n"
+                "  • Firewall blocking UDP — Decart's realtime API needs "
+                "UDP traversal for WebRTC ICE.\n"
+                "  • Decart API key invalid or revoked — verify it in the "
+                "⚙ Settings panel."
             ) from exc
 
         def _on_connection_change(state: str) -> None:

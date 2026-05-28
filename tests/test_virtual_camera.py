@@ -61,34 +61,103 @@ def test_runtime_options_default_no_vcam() -> None:
     assert fields["virtual_camera"].default is False
 
 
-def test_obs_vcam_check_handles_missing(monkeypatch, tmp_path) -> None:
-    """When no driver paths exist, the check fails with an install hint."""
+class _FakePath:
+    """Always-missing Path replacement for the win32 driver-detection tests."""
+
+    def __init__(self, *_a, **_kw) -> None:
+        pass
+
+    def exists(self) -> bool:
+        return False
+
+
+def test_obs_vcam_check_handles_missing(monkeypatch) -> None:
+    """When NEITHER the driver nor pyvirtualcam are present, the check
+    fails with a hint that mentions both fixes."""
     from swap_cli import voice_prereq
 
     monkeypatch.setattr(voice_prereq.sys, "platform", "win32")
-    # Stub Path so every candidate path's .exists() returns False.
-    real_path = voice_prereq.Path
-
-    class FakePath:
-        def __init__(self, *a, **kw):
-            self._real = real_path(tmp_path) / "nope"
-
-        def exists(self):  # noqa: D401
-            return False
-
-    monkeypatch.setattr(voice_prereq, "Path", FakePath)
+    monkeypatch.setattr(voice_prereq, "Path", _FakePath)
+    monkeypatch.setattr(
+        voice_prereq.importlib.util, "find_spec", lambda name: None
+    )
 
     check = voice_prereq._check_obs_vcam()
     assert check.ok is False
     assert check.hint is not None
-    assert "obs" in check.hint.lower() or "obsproject" in check.hint.lower()
+    h = check.hint.lower()
+    assert "obs" in h or "obsproject" in h
+    assert "pip install" in h
+
+
+def test_obs_vcam_driver_present_but_pyvcam_missing(monkeypatch) -> None:
+    """Sprint 14m branch: user has OBS installed but didn't reinstall
+    swap-cli after the 14k dep bump. Hint must point at `pip install`."""
+    from swap_cli import voice_prereq
+
+    monkeypatch.setattr(voice_prereq.sys, "platform", "win32")
+
+    class _ExistingPath(_FakePath):
+        def exists(self) -> bool:
+            return True
+
+    monkeypatch.setattr(voice_prereq, "Path", _ExistingPath)
+    monkeypatch.setattr(
+        voice_prereq.importlib.util, "find_spec", lambda name: None
+    )
+
+    check = voice_prereq._check_obs_vcam()
+    assert check.ok is False
+    assert "pyvirtualcam" in check.label.lower()
+    assert "pip install" in (check.hint or "").lower()
+
+
+def test_obs_vcam_pyvcam_present_but_driver_missing(monkeypatch) -> None:
+    """Sprint 14m branch: dev environment with pip dep but no OBS install.
+    Hint must point at the OBS Studio installer."""
+    from swap_cli import voice_prereq
+
+    monkeypatch.setattr(voice_prereq.sys, "platform", "win32")
+    monkeypatch.setattr(voice_prereq, "Path", _FakePath)
+    monkeypatch.setattr(
+        voice_prereq.importlib.util, "find_spec", lambda name: object()
+    )
+
+    check = voice_prereq._check_obs_vcam()
+    assert check.ok is False
+    assert "driver missing" in check.label.lower() or "obs" in check.label.lower()
+    assert "obsproject" in (check.hint or "").lower()
+
+
+def test_obs_vcam_both_present(monkeypatch) -> None:
+    """Happy path: driver + pyvirtualcam both there → ok=True."""
+    from swap_cli import voice_prereq
+
+    monkeypatch.setattr(voice_prereq.sys, "platform", "win32")
+
+    class _ExistingPath(_FakePath):
+        def exists(self) -> bool:
+            return True
+
+    monkeypatch.setattr(voice_prereq, "Path", _ExistingPath)
+    monkeypatch.setattr(
+        voice_prereq.importlib.util, "find_spec", lambda name: object()
+    )
+
+    check = voice_prereq._check_obs_vcam()
+    assert check.ok is True
+    assert "ready" in check.label.lower()
 
 
 def test_obs_vcam_check_linux_soft_passes(monkeypatch) -> None:
-    """On Linux we soft-pass (v4l2loopback can be modprobed on demand)."""
+    """On Linux we soft-pass the driver (v4l2loopback can be modprobed
+    on demand) BUT still require pyvirtualcam. With both, ok=True."""
     from swap_cli import voice_prereq
 
     monkeypatch.setattr(voice_prereq.sys, "platform", "linux")
+    monkeypatch.setattr(
+        voice_prereq.importlib.util, "find_spec", lambda name: object()
+    )
     check = voice_prereq._check_obs_vcam()
     assert check.ok is True
 
