@@ -482,10 +482,39 @@ class SwapGUI(ctk.CTk):
             self._status_var.set("No cameras detected. Plug one in and click ↻.")
             return
 
-        labels = [c.label for c in self._cameras]
+        # Sprint 14o: prefix virtual cameras with ⚠ in the dropdown so
+        # users see the feedback-loop warning at a glance. Then auto-
+        # select the first REAL (non-virtual) camera; fall back to the
+        # first device of any kind if only virtuals are present.
+        def _label_for_display(cam: CameraDevice) -> str:
+            return f"⚠ {cam.label}" if cam.virtual else cam.label
+
+        labels = [_label_for_display(c) for c in self._cameras]
         self._camera_dropdown.configure(values=labels)
-        self._camera_var.set(labels[0])
-        self._status_var.set(f"{len(self._cameras)} camera(s) detected.")
+
+        real_idx = next(
+            (i for i, c in enumerate(self._cameras) if not c.virtual),
+            None,
+        )
+        if real_idx is not None:
+            self._camera_var.set(labels[real_idx])
+            virtual_count = sum(1 for c in self._cameras if c.virtual)
+            note = (
+                f" ({virtual_count} virtual hidden from default)"
+                if virtual_count
+                else ""
+            )
+            self._status_var.set(
+                f"{len(self._cameras)} camera(s) detected{note}."
+            )
+        else:
+            # Only virtuals available — picking one would create the
+            # feedback loop if vcam output is on. Warn the user.
+            self._camera_var.set(labels[0])
+            self._status_var.set(
+                "⚠ Only virtual cameras detected. Close any app holding "
+                "your real webcam (Zoom/Teams/Discord) and click ↻."
+            )
 
     def _refresh_status(self) -> None:
         cfg = config.load()
@@ -494,6 +523,11 @@ class SwapGUI(ctk.CTk):
 
     def _selected_camera(self) -> CameraDevice | None:
         label = self._camera_var.get()
+        # Sprint 14o: dropdown labels for virtual cameras are prefixed
+        # with "⚠ " — strip that before matching against the original
+        # CameraDevice.label.
+        if label.startswith("⚠ "):
+            label = label[2:]
         for cam in self._cameras:
             if cam.label == label:
                 return cam
@@ -525,6 +559,25 @@ class SwapGUI(ctk.CTk):
             print("[gui] bail: no camera selected", flush=True)
             self._status_var.set("No camera selected.")
             return
+
+        # Sprint 14o: refuse the feedback-loop combo. If the user has
+        # picked a virtual camera as input AND has vcam output enabled,
+        # swap would be reading from the same device it writes to —
+        # Lucy would consume its own previous frames, producing the
+        # "very weird" recursive transform the user reported.
+        vcam_on = bool(self._vcam_var.get()) if hasattr(self, "_vcam_var") else True
+        if camera.virtual and vcam_on:
+            print(
+                f"[gui] bail: feedback loop — camera={camera.label} + vcam on",
+                flush=True,
+            )
+            self._status_var.set(
+                "⚠ Feedback loop: virtual camera as input + virtual camera "
+                "output. Pick a real webcam, or toggle off 'Output to "
+                "virtual camera' in options."
+            )
+            return
+
         print(f"[gui] starting session: face={self._reference_path}, camera={camera.index}", flush=True)
 
         record_path: Path | None = None

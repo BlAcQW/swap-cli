@@ -26,6 +26,34 @@ PROBE_TIMEOUT_S = 3.0
 class CameraDevice:
     index: int
     label: str
+    # Sprint 14o: True when the device's name matches a virtual-camera
+    # driver (OBS / Snap / ManyCam / DroidCam / XSplit / generic). The
+    # GUI deprioritises these in auto-pick to avoid the feedback loop:
+    # swap reading from OBS Virtual Camera while also writing to it.
+    virtual: bool = False
+
+
+# Virtual-camera deny list. Sprint 14o: user hit a feedback loop where
+# swap auto-picked OBS Virtual Camera (because the real webcam probe
+# timed out) and then also wrote its output to it — Lucy was consuming
+# its own previous frames. Mirror voice_router's Sound Mapper pattern.
+_VIRTUAL_CAMERA_NEEDLES = (
+    "obs virtual",
+    "virtual camera",
+    "virtual webcam",
+    "snap camera",
+    "manycam",
+    "xsplit",
+    "droidcam",
+    "e2esoft",
+    "iriun",
+)
+
+
+def is_virtual_camera(name: str) -> bool:
+    """True iff the device name matches a known virtual-camera driver."""
+    n = (name or "").lower()
+    return any(needle in n for needle in _VIRTUAL_CAMERA_NEEDLES)
 
 
 # Inline probe script — runs in a child Python process so an OpenCV
@@ -58,21 +86,31 @@ def _backend_for_platform() -> int:
     return cv2.CAP_V4L2
 
 
-def _probe_one(index: int, backend: int) -> bool:
-    """Probe a single camera index in an isolated subprocess."""
+def _probe_one(index: int, backend: int) -> tuple[bool, str]:
+    """Probe a single camera index in an isolated subprocess.
+
+    Returns (ok, reason). reason is one of:
+      ""             - probe succeeded
+      "timeout"      - cv2.VideoCapture blocked > PROBE_TIMEOUT_S; most
+                       common cause is another app holding the camera
+                       (Zoom/Teams/Discord/browsers)
+      "not_present"  - probe returned non-zero exit; the index doesn't
+                       map to a real device
+      "error:<msg>"  - subprocess raised something unexpected
+    """
     try:
         proc = subprocess.run(
             [sys.executable, "-c", _PROBE_SCRIPT, str(index), str(backend)],
             capture_output=True,
             timeout=PROBE_TIMEOUT_S,
         )
-        return proc.returncode == 0
+        if proc.returncode == 0:
+            return True, ""
+        return False, "not_present"
     except subprocess.TimeoutExpired:
-        print(f"[devices] index {index} probe timed out", flush=True)
-        return False
+        return False, "timeout"
     except Exception as err:  # noqa: BLE001
-        print(f"[devices] index {index} probe error: {err}", flush=True)
-        return False
+        return False, f"error:{err}"
 
 
 def _windows_friendly_names() -> dict[int, str]:
@@ -122,7 +160,13 @@ def _friendly_names() -> dict[int, str]:
 
 
 def enumerate_cameras() -> list[CameraDevice]:
-    """Return working cameras with their friendly names where possible."""
+    """Return working cameras with their friendly names where possible.
+
+    Sprint 14o: each device now carries a `virtual` flag so the GUI can
+    deprioritise OBS/Snap/etc. when picking the default input. Probe
+    failures distinguish timeout (camera held by another app) from
+    not_present (no device at that index).
+    """
     backend = _backend_for_platform()
     names = _friendly_names()
     if names:
@@ -131,13 +175,30 @@ def enumerate_cameras() -> list[CameraDevice]:
     devices: list[CameraDevice] = []
     for i in range(MAX_CAMERAS):
         print(f"[devices] probing index {i} (subprocess, backend={backend})", flush=True)
-        if _probe_one(i, backend):
-            label = _label_for(i, names.get(i))
-            print(f"[devices] index {i} ok — {label}", flush=True)
-            devices.append(CameraDevice(index=i, label=label))
+        ok, reason = _probe_one(i, backend)
+        if ok:
+            friendly = names.get(i)
+            label = _label_for(i, friendly)
+            virtual = is_virtual_camera(friendly or "")
+            tag = " [virtual]" if virtual else ""
+            print(f"[devices] index {i} ok — {label}{tag}", flush=True)
+            devices.append(CameraDevice(index=i, label=label, virtual=virtual))
+        elif reason == "timeout":
+            print(
+                f"[devices] index {i} probe timed out — another app may be holding "
+                "this camera (Zoom/Teams/Discord/browsers). Close it and re-launch.",
+                flush=True,
+            )
+        elif reason.startswith("error:"):
+            print(f"[devices] index {i} probe error: {reason[6:]}", flush=True)
         else:
             print(f"[devices] index {i} unavailable", flush=True)
-    print(f"[devices] {len(devices)} camera(s) found", flush=True)
+    real = sum(1 for d in devices if not d.virtual)
+    virtual = sum(1 for d in devices if d.virtual)
+    print(
+        f"[devices] {len(devices)} camera(s) found ({real} real, {virtual} virtual)",
+        flush=True,
+    )
     return devices
 
 
