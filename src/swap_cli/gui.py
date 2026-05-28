@@ -43,6 +43,51 @@ ctk.set_default_color_theme("blue")
 THUMB_SIZE = (140, 140)
 
 
+# Sprint 14l: settings panel helpers.
+# Pure functions so they're trivially unit-testable without spinning a tk root.
+
+
+def _redact_key(value: str | None) -> str:
+    """Show last 4 chars only: 'dct_a…AB12' or '—' if absent."""
+    if not value:
+        return "—"
+    if len(value) <= 4:
+        return value
+    return f"{value[:4]}…{value[-4:]}"
+
+
+class DecartKeyValidationError(ValueError):
+    """Raised when a candidate Decart API key fails basic format checks."""
+
+
+def apply_decart_key_update(new_key: str) -> None:
+    """Validate + persist a new Decart API key.
+
+    Loose validation: must start with 'dct_' and be at least 20 chars.
+    Decart's exact format isn't documented and changes over time, so we
+    only catch obvious typos (empty, "dct_short", pasted gibberish) here.
+    Real validation happens at session-open time when the SDK rejects
+    the key.
+
+    Side effects on success:
+      - config.update(decart_api_key=<new>, license_cached_at=None,
+        license_cached_valid_until=None) — the cache reset forces the
+        next session to re-validate the license against the server.
+    """
+    trimmed = (new_key or "").strip()
+    if not trimmed.startswith("dct_"):
+        raise DecartKeyValidationError("Decart key must start with 'dct_'.")
+    if len(trimmed) < 20:
+        raise DecartKeyValidationError(
+            f"Decart key looks too short ({len(trimmed)} chars; expect ≥ 20)."
+        )
+    config.update(
+        decart_api_key=trimmed,
+        license_cached_at=None,
+        license_cached_valid_until=None,
+    )
+
+
 class SwapGUI(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -87,6 +132,21 @@ class SwapGUI(ctk.CTk):
     def _build_ui(self) -> None:
         outer = ctk.CTkFrame(self, fg_color="transparent")
         outer.pack(fill="both", expand=True, padx=20, pady=18)
+
+        # Settings (gear) button — top-right, opens the settings modal.
+        title_bar = ctk.CTkFrame(outer, fg_color="transparent")
+        title_bar.pack(fill="x", pady=(0, 4))
+        ctk.CTkButton(
+            title_bar,
+            text="⚙",
+            width=36,
+            height=36,
+            corner_radius=18,
+            command=self._on_settings_clicked,
+            fg_color="#374151",
+            hover_color="#4b5563",
+            font=ctk.CTkFont(size=16),
+        ).pack(side="right")
 
         # Top: face thumbnail + reference picker
         top = ctk.CTkFrame(outer, fg_color="transparent")
@@ -374,6 +434,17 @@ class SwapGUI(ctk.CTk):
             )
             self._advanced_open.set(True)
             self._advanced_toggle.configure(text="⚙ Advanced (hide)")
+
+    def _on_settings_clicked(self) -> None:
+        """Spawn the settings modal. Reuses the existing one if open."""
+        try:
+            if getattr(self, "_settings_modal", None) is not None and self._settings_modal.winfo_exists():
+                self._settings_modal.deiconify()
+                self._settings_modal.focus_force()
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        self._settings_modal = _SettingsModal(self)
 
     def _on_select_face(self) -> None:
         path = filedialog.askopenfilename(
@@ -1283,6 +1354,258 @@ class VoiceOnlyGUI(ctk.CTk):
             self.attributes("-topmost", True)
             self.after(200, lambda: self.attributes("-topmost", False))
             self.focus_force()
+        except Exception:
+            pass
+
+
+class _SettingsModal(ctk.CTkToplevel):
+    """Settings panel — view license key, rotate Decart API key, open
+    the config folder. Sprint 14l.
+
+    All state lives in config.toml on disk. We never cache it in memory
+    longer than the modal's lifetime, so save → close → reopen always
+    reflects current truth.
+    """
+
+    def __init__(self, parent: "SwapGUI") -> None:
+        super().__init__(parent)
+        self._parent = parent
+        self.title("Settings")
+        self.geometry("560x420")
+        self.resizable(False, False)
+        self.after(0, self._center_on_parent)
+
+        cfg = config.load()
+
+        outer = ctk.CTkFrame(self, fg_color="transparent")
+        outer.pack(fill="both", expand=True, padx=20, pady=18)
+
+        ctk.CTkLabel(
+            outer,
+            text="Settings",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        # ── License key (read-only) ────────────────────────────────────
+        license_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
+        license_frame.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(
+            license_frame,
+            text="License key",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#9ca3af",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(10, 0))
+        ctk.CTkLabel(
+            license_frame,
+            text=_redact_key(cfg.license_key),
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(2, 4))
+        ctk.CTkLabel(
+            license_frame,
+            text="Bought from swap.ikieguy.online — rotate by contacting support.",
+            font=ctk.CTkFont(size=10),
+            text_color="#6b7280",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 10))
+
+        # ── Decart key (editable) ──────────────────────────────────────
+        decart_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
+        decart_frame.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(
+            decart_frame,
+            text="Decart API key",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#9ca3af",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(10, 0))
+
+        self._decart_var = tk.StringVar(value=cfg.decart_api_key or "")
+        self._editing = False
+        self._decart_show = tk.BooleanVar(value=False)
+        self._decart_label = ctk.CTkLabel(
+            decart_frame,
+            text=_redact_key(cfg.decart_api_key),
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+        )
+        self._decart_label.pack(fill="x", padx=14, pady=(2, 4))
+
+        self._decart_entry = ctk.CTkEntry(
+            decart_frame,
+            textvariable=self._decart_var,
+            show="•",
+            placeholder_text="dct_…",
+        )
+        # Hidden until Edit is clicked.
+
+        btn_row = ctk.CTkFrame(decart_frame, fg_color="transparent")
+        btn_row.pack(fill="x", padx=14, pady=(0, 10))
+        self._edit_btn = ctk.CTkButton(
+            btn_row, text="✎ Edit", width=80, command=self._on_edit
+        )
+        self._edit_btn.pack(side="left")
+        self._show_btn = ctk.CTkButton(
+            btn_row,
+            text="👁 Show",
+            width=80,
+            command=self._on_toggle_show,
+            fg_color="#374151",
+            hover_color="#4b5563",
+        )
+        self._show_btn.pack(side="left", padx=(8, 0))
+        self._save_btn = ctk.CTkButton(
+            btn_row, text="Save", width=80, command=self._on_save
+        )
+        self._cancel_btn = ctk.CTkButton(
+            btn_row,
+            text="Cancel",
+            width=80,
+            command=self._on_cancel,
+            fg_color="#374151",
+            hover_color="#4b5563",
+        )
+        # Save/Cancel hidden until Edit is clicked.
+
+        self._error_label = ctk.CTkLabel(
+            decart_frame, text="", text_color="#ef4444", anchor="w"
+        )
+        self._error_label.pack(fill="x", padx=14, pady=(0, 4))
+
+        # ── Config file path ───────────────────────────────────────────
+        path_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
+        path_frame.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(
+            path_frame,
+            text="Config file",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#9ca3af",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(10, 0))
+        cfg_path = config.config_path()
+        ctk.CTkLabel(
+            path_frame,
+            text=str(cfg_path),
+            font=ctk.CTkFont(size=11),
+            text_color="#d1d5db",
+            anchor="w",
+            wraplength=480,
+            justify="left",
+        ).pack(fill="x", padx=14, pady=(2, 4))
+        ctk.CTkButton(
+            path_frame,
+            text="📁 Open folder",
+            width=140,
+            command=self._on_open_folder,
+            fg_color="#374151",
+            hover_color="#4b5563",
+        ).pack(anchor="w", padx=14, pady=(0, 10))
+
+        # ── Close ──────────────────────────────────────────────────────
+        ctk.CTkButton(
+            outer,
+            text="Close",
+            command=self.destroy,
+            height=36,
+            fg_color="#ec4899",
+            hover_color="#db2777",
+        ).pack(fill="x", side="bottom")
+
+        self._status_var = tk.StringVar(value="")
+        ctk.CTkLabel(
+            outer,
+            textvariable=self._status_var,
+            text_color="#10b981",
+            anchor="w",
+        ).pack(fill="x", side="bottom", pady=(0, 8))
+
+    def _on_edit(self) -> None:
+        self._editing = True
+        self._decart_label.pack_forget()
+        self._decart_entry.pack(fill="x", padx=14, pady=(0, 4))
+        self._edit_btn.pack_forget()
+        self._show_btn.pack_forget()
+        self._save_btn.pack(side="left")
+        self._cancel_btn.pack(side="left", padx=(8, 0))
+        self._error_label.configure(text="")
+
+    def _on_cancel(self) -> None:
+        # Restore current saved value into the var.
+        cfg = config.load()
+        self._decart_var.set(cfg.decart_api_key or "")
+        self._editing = False
+        self._decart_entry.pack_forget()
+        self._save_btn.pack_forget()
+        self._cancel_btn.pack_forget()
+        self._decart_label.configure(text=_redact_key(cfg.decart_api_key))
+        self._decart_label.pack(fill="x", padx=14, pady=(2, 4))
+        self._edit_btn.pack(side="left")
+        self._show_btn.pack(side="left", padx=(8, 0))
+        self._error_label.configure(text="")
+
+    def _on_save(self) -> None:
+        try:
+            apply_decart_key_update(self._decart_var.get())
+        except DecartKeyValidationError as err:
+            self._error_label.configure(text=str(err))
+            return
+        # Saved. Collapse the editor + show a toast.
+        cfg = config.load()
+        self._editing = False
+        self._decart_entry.pack_forget()
+        self._save_btn.pack_forget()
+        self._cancel_btn.pack_forget()
+        self._decart_label.configure(text=_redact_key(cfg.decart_api_key))
+        self._decart_label.pack(fill="x", padx=14, pady=(2, 4))
+        self._edit_btn.pack(side="left")
+        self._show_btn.pack(side="left", padx=(8, 0))
+        self._status_var.set("✓ Decart key updated. Takes effect next session.")
+        self.after(3500, lambda: self._status_var.set(""))
+        # Refresh the parent status row so it picks up the change.
+        try:
+            self._parent._refresh_status()
+        except Exception:  # noqa: BLE001 — non-fatal cosmetic
+            pass
+
+    def _on_toggle_show(self) -> None:
+        self._decart_show.set(not self._decart_show.get())
+        cfg = config.load()
+        if self._decart_show.get():
+            self._decart_label.configure(text=cfg.decart_api_key or "—")
+            self._show_btn.configure(text="🙈 Hide")
+        else:
+            self._decart_label.configure(text=_redact_key(cfg.decart_api_key))
+            self._show_btn.configure(text="👁 Show")
+
+    def _on_open_folder(self) -> None:
+        import os
+        import subprocess
+
+        folder = config.config_path().parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(str(folder))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except Exception as err:  # noqa: BLE001
+            self._error_label.configure(text=f"Couldn't open folder: {err}")
+
+    def _center_on_parent(self) -> None:
+        try:
+            px = self._parent.winfo_x()
+            py = self._parent.winfo_y()
+            pw = self._parent.winfo_width()
+            ph = self._parent.winfo_height()
+            ww = 560
+            wh = 420
+            x = px + (pw - ww) // 2
+            y = py + (ph - wh) // 2
+            self.geometry(f"{ww}x{wh}+{max(0, x)}+{max(0, y)}")
         except Exception:
             pass
 
