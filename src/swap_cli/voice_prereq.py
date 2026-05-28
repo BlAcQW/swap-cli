@@ -271,11 +271,27 @@ def _check_obs_vcam() -> Check:
     has_pyvcam = importlib.util.find_spec("pyvirtualcam") is not None
 
     if sys.platform == "win32":
-        candidates = [
-            Path("C:/Program Files/obs-studio/bin/64bit/obs-virtualcam-module64.dll"),
-            Path("C:/Program Files (x86)/obs-studio/bin/64bit/obs-virtualcam-module64.dll"),
+        # OBS has shipped the virtual camera DLL under several paths over
+        # the years:
+        #   pre-29:  bin/64bit/obs-virtualcam-module64.dll
+        #   29+:     data/obs-plugins/win-dshow/obs-virtualcam-module64.dll
+        # Plus future re-shuffles. rglob walks the install tree so we
+        # find the DLL regardless of layout. ~50 ms worst case, only
+        # runs on `swap doctor` so the cost is fine.
+        roots = [
+            Path("C:/Program Files/obs-studio"),
+            Path("C:/Program Files (x86)/obs-studio"),
         ]
-        driver_ok = any(p.exists() for p in candidates)
+        driver_ok = False
+        for root in roots:
+            if not root.exists():
+                continue
+            try:
+                if any(root.rglob("obs-virtualcam-module64.dll")):
+                    driver_ok = True
+                    break
+            except (OSError, PermissionError):
+                continue
     elif sys.platform == "darwin":
         plugin = Path("/Library/CoreMediaIO/Plug-Ins/DAL/obs-mac-virtualcam.plugin")
         driver_ok = plugin.exists()

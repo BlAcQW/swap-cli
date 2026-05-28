@@ -62,13 +62,38 @@ def test_runtime_options_default_no_vcam() -> None:
 
 
 class _FakePath:
-    """Always-missing Path replacement for the win32 driver-detection tests."""
+    """Path replacement for the win32 driver-detection tests.
+
+    Sprint 14n: the production code now uses rglob to walk the OBS
+    install tree (modern OBS releases moved the DLL out of bin/64bit/).
+    The fake therefore needs to expose rglob in addition to exists.
+
+    Set `_rglob_matches` on the class to control rglob's return value:
+      []           → no DLL found (driver_ok=False)
+      [<anything>] → DLL found (driver_ok=True)
+    """
+
+    _exists: bool = False
+    _rglob_matches: list = []
 
     def __init__(self, *_a, **_kw) -> None:
         pass
 
     def exists(self) -> bool:
-        return False
+        return self._exists
+
+    def rglob(self, _pattern):
+        return iter(self._rglob_matches)
+
+
+def _make_fake_path(*, exists: bool, rglob_matches: list | None = None) -> type:
+    """Build a _FakePath subclass that simulates a specific OBS state."""
+    matches = rglob_matches or []
+    return type(
+        "_FakeP",
+        (_FakePath,),
+        {"_exists": exists, "_rglob_matches": matches},
+    )
 
 
 def test_obs_vcam_check_handles_missing(monkeypatch) -> None:
@@ -77,7 +102,10 @@ def test_obs_vcam_check_handles_missing(monkeypatch) -> None:
     from swap_cli import voice_prereq
 
     monkeypatch.setattr(voice_prereq.sys, "platform", "win32")
-    monkeypatch.setattr(voice_prereq, "Path", _FakePath)
+    # OBS install roots don't exist; rglob never runs.
+    monkeypatch.setattr(
+        voice_prereq, "Path", _make_fake_path(exists=False, rglob_matches=[])
+    )
     monkeypatch.setattr(
         voice_prereq.importlib.util, "find_spec", lambda name: None
     )
@@ -91,17 +119,17 @@ def test_obs_vcam_check_handles_missing(monkeypatch) -> None:
 
 
 def test_obs_vcam_driver_present_but_pyvcam_missing(monkeypatch) -> None:
-    """Sprint 14m branch: user has OBS installed but didn't reinstall
-    swap-cli after the 14k dep bump. Hint must point at `pip install`."""
+    """User has OBS installed (rglob finds the DLL) but didn't reinstall
+    swap-cli after the 14k dep bump. Hint points at `pip install`."""
     from swap_cli import voice_prereq
 
     monkeypatch.setattr(voice_prereq.sys, "platform", "win32")
-
-    class _ExistingPath(_FakePath):
-        def exists(self) -> bool:
-            return True
-
-    monkeypatch.setattr(voice_prereq, "Path", _ExistingPath)
+    # OBS root exists AND rglob returns at least one DLL match.
+    monkeypatch.setattr(
+        voice_prereq,
+        "Path",
+        _make_fake_path(exists=True, rglob_matches=["fake-dll-path"]),
+    )
     monkeypatch.setattr(
         voice_prereq.importlib.util, "find_spec", lambda name: None
     )
@@ -113,12 +141,14 @@ def test_obs_vcam_driver_present_but_pyvcam_missing(monkeypatch) -> None:
 
 
 def test_obs_vcam_pyvcam_present_but_driver_missing(monkeypatch) -> None:
-    """Sprint 14m branch: dev environment with pip dep but no OBS install.
-    Hint must point at the OBS Studio installer."""
+    """Dev environment with pip dep but no OBS install. Hint points at
+    the OBS Studio installer."""
     from swap_cli import voice_prereq
 
     monkeypatch.setattr(voice_prereq.sys, "platform", "win32")
-    monkeypatch.setattr(voice_prereq, "Path", _FakePath)
+    monkeypatch.setattr(
+        voice_prereq, "Path", _make_fake_path(exists=False, rglob_matches=[])
+    )
     monkeypatch.setattr(
         voice_prereq.importlib.util, "find_spec", lambda name: object()
     )
@@ -134,12 +164,11 @@ def test_obs_vcam_both_present(monkeypatch) -> None:
     from swap_cli import voice_prereq
 
     monkeypatch.setattr(voice_prereq.sys, "platform", "win32")
-
-    class _ExistingPath(_FakePath):
-        def exists(self) -> bool:
-            return True
-
-    monkeypatch.setattr(voice_prereq, "Path", _ExistingPath)
+    monkeypatch.setattr(
+        voice_prereq,
+        "Path",
+        _make_fake_path(exists=True, rglob_matches=["fake-dll-path"]),
+    )
     monkeypatch.setattr(
         voice_prereq.importlib.util, "find_spec", lambda name: object()
     )
@@ -147,6 +176,33 @@ def test_obs_vcam_both_present(monkeypatch) -> None:
     check = voice_prereq._check_obs_vcam()
     assert check.ok is True
     assert "ready" in check.label.lower()
+
+
+def test_obs_vcam_finds_modern_layout(monkeypatch) -> None:
+    """Sprint 14n regression guard: modern OBS (≥29) puts the DLL under
+    data/obs-plugins/win-dshow/, not bin/64bit/. rglob must find it
+    regardless of layout."""
+    from pathlib import PurePosixPath
+
+    from swap_cli import voice_prereq
+
+    monkeypatch.setattr(voice_prereq.sys, "platform", "win32")
+
+    modern_match = PurePosixPath(
+        "C:/Program Files/obs-studio/data/obs-plugins/win-dshow/"
+        "obs-virtualcam-module64.dll"
+    )
+    monkeypatch.setattr(
+        voice_prereq,
+        "Path",
+        _make_fake_path(exists=True, rglob_matches=[modern_match]),
+    )
+    monkeypatch.setattr(
+        voice_prereq.importlib.util, "find_spec", lambda name: object()
+    )
+
+    check = voice_prereq._check_obs_vcam()
+    assert check.ok is True
 
 
 def test_obs_vcam_check_linux_soft_passes(monkeypatch) -> None:
