@@ -32,14 +32,29 @@ swap gui          # OR  swap run -r face.jpg
 pip install swap-cli
 ```
 
-Pulls native deps: `decart`, `aiortc`, `opencv-python`, `customtkinter`. ~150 MB,
-~60 seconds on a normal connection.
+Pulls native deps: `decart`, `aiortc`, `opencv-python`, `customtkinter`,
+`pyvirtualcam`. ~150 MB, ~60 seconds on a normal connection.
 
 If `swap` isn't on your `$PATH` after install, fix it:
 
 ```bash
 python -m swap_cli --help
 ```
+
+> **macOS users — read this first.** Don't use the system Python at
+> `/usr/bin/python3`. Its Tcl/Tk is 8.5.9 (broken) and the GUI will fail.
+> Use Homebrew Python or python.org Python:
+>
+> ```bash
+> brew install python@3.11 python-tk@3.11        # GUI needs Tcl/Tk ≥ 8.6.9
+> xcode-select --install                          # git + C compiler (voice)
+> brew install blackhole-2ch                      # voice routing (optional)
+> # Then download OBS Studio for the virtual camera driver:
+> #   https://obsproject.com/download
+> pip install swap-cli
+> ```
+>
+> See **macOS compatibility** below for the full breakdown.
 
 ---
 
@@ -261,6 +276,62 @@ Your Decart dashboard shows the running tally. We're never in that loop.
 sudo apt install python3-tk    # Debian/Ubuntu
 sudo dnf install python3-tkinter  # Fedora
 ```
+
+---
+
+## macOS compatibility
+
+The base install (`pip install swap-cli`) works cleanly on both Apple Silicon
+and Intel Macs — every base dependency has a pre-built arm64 wheel, no
+compilation needed. The differences are concentrated in the optional voice
+features.
+
+| Feature | macOS support |
+|---|---|
+| Live deepfake (Decart Lucy 2) | ✅ Works — runs in Decart's cloud, no local GPU needed |
+| `swap gui` (customtkinter window) | ⚠️ Needs Tcl/Tk ≥ 8.6.9 — system Python's 8.5.9 won't work; use python.org or `brew install python-tk@3.11` |
+| Virtual camera output → Zoom / Meet / Discord | ✅ Works via OBS Virtual Camera (install OBS Studio once) |
+| `swap voices add` (one-shot reference voice extraction) | ✅ Works on CPU, ~5 s per add |
+| Live RVC voice streaming on **Apple Silicon** | ⚠️ CPU-only — too slow for real-time conversation; doctor reports honestly |
+| Live RVC voice streaming on **Intel Mac** | ❌ Unsupported (no NVIDIA, no usable CPU path) |
+| First-time voice install (`swap voices install`) | ⚠️ Needs Xcode CLT for `git` + C compiler (`xcode-select --install`) |
+| Audio routing into Zoom/Meet | ✅ BlackHole (`brew install blackhole-2ch`) |
+
+### macOS install (one-time setup)
+
+```bash
+# 1. Python 3.11 with proper Tcl/Tk
+brew install python@3.11 python-tk@3.11
+
+# 2. Xcode Command Line Tools (git + C compiler)
+xcode-select --install
+
+# 3. Optional: virtual audio cable for voice routing into Zoom/Meet
+brew install blackhole-2ch
+
+# 4. Optional: OBS Studio for the virtual camera driver
+# https://obsproject.com/download    (no need to run the OBS app)
+
+# 5. swap-cli itself
+pip install swap-cli
+
+# 6. Verify
+swap doctor
+```
+
+Every row in `swap doctor` should be `✓`. The macOS-specific rows
+(`tcl/tk version`, `virtual camera`) tell you exactly what to fix
+if they're not.
+
+### What does NOT work well on macOS yet
+
+- **Live voice on Apple Silicon** — RVC streaming is GPU-bound; Apple's
+  MPS path is broken upstream for fairseq (the model loader). On M-series
+  CPUs you'll get ~4–6× real-time speed which is too slow for live
+  conversation. Voice add/extract still works fine.
+- **Live voice on Intel Mac** — no GPU path at all.
+- **FaceTime / iOS apps** — Apple sandboxes virtual cameras for those.
+  Zoom / Meet / Discord / browsers see "OBS Virtual Camera" normally.
 
 ---
 

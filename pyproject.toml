@@ -1,11 +1,40 @@
 [project]
 name = "swap-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "Real-time deepfake on your desktop. Bring your own Decart API key."
-authors = [{ name = "swap" }]
+authors = [{ name = "BlAcQW", email = "enochhenyo@gmail.com" }]
 readme = "README.md"
 license = { file = "LICENSE.md" }
 requires-python = ">=3.11"
+keywords = [
+    "deepfake",
+    "video",
+    "decart",
+    "lucy",
+    "voice-conversion",
+    "rvc",
+    "obs",
+    "real-time",
+    "ai",
+    "virtual-camera",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "License :: Other/Proprietary License",
+    "Natural Language :: English",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
 dependencies = [
     "decart>=0.0.35",
     # decart's realtime module imports tenacity but doesn't declare it.
@@ -30,6 +59,12 @@ dependencies = [
     # installed out-of-band (user runs OBS Studio installer once).
     "pyvirtualcam>=0.13",
 ]
+
+[project.urls]
+Homepage = "https://github.com/BlAcQW/swap-cli"
+Repository = "https://github.com/BlAcQW/swap-cli"
+Issues = "https://github.com/BlAcQW/swap-cli/issues"
+Releases = "https://github.com/BlAcQW/swap-cli/releases"
 
 [project.optional-dependencies]
 dev = [
