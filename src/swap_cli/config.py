@@ -38,6 +38,15 @@ class Config:
     # (skip Faiss retrieval). Trades timbre quality for big speedup —
     # essential on weak GPUs or when using voices with huge .index files.
     voice_fast: bool = False
+    # Sprint 15: per-frame watermark removal. The Decart "AI Generated"
+    # badge roams the frame, so removal runs template-match + inpaint on
+    # every frame. All optional — older config files load fine. Off by
+    # default so existing users aren't surprised by the latency cost.
+    remove_watermark: bool = False
+    watermark_template: str | None = None  # path to captured watermark PNG
+    watermark_method: str = "template"  # "template" | "threshold"
+    watermark_threshold: float = 0.50  # matchTemplate confidence gate (0..1)
+    watermark_inpaint_radius: int = 3
 
     @property
     def is_complete(self) -> bool:
@@ -69,6 +78,11 @@ def load() -> Config:
         last_voice_output=_int_or_none(data.get("last_voice_output")),
         voice_engine=_clean(data.get("voice_engine")) or "rvc",
         voice_fast=bool(data.get("voice_fast", False)),
+        remove_watermark=bool(data.get("remove_watermark", False)),
+        watermark_template=_clean(data.get("watermark_template")),
+        watermark_method=_clean(data.get("watermark_method")) or "template",
+        watermark_threshold=_float_or_none(data.get("watermark_threshold")) or 0.50,
+        watermark_inpaint_radius=_int_or_none(data.get("watermark_inpaint_radius")) or 3,
     )
 
 
@@ -98,6 +112,16 @@ def save(cfg: Config) -> Path:
         body.append(f'voice_engine = "{_escape(cfg.voice_engine)}"')
     if cfg.voice_fast:
         body.append("voice_fast = true")
+    if cfg.remove_watermark:
+        body.append("remove_watermark = true")
+    if cfg.watermark_template:
+        body.append(f'watermark_template = "{_escape(cfg.watermark_template)}"')
+    if cfg.watermark_method and cfg.watermark_method != "template":
+        body.append(f'watermark_method = "{_escape(cfg.watermark_method)}"')
+    if cfg.watermark_threshold != 0.50:
+        body.append(f"watermark_threshold = {cfg.watermark_threshold}")
+    if cfg.watermark_inpaint_radius != 3:
+        body.append(f"watermark_inpaint_radius = {cfg.watermark_inpaint_radius}")
 
     text = "\n".join(body) + "\n"
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -124,6 +148,13 @@ def update(**kwargs: Any) -> Config:
         last_voice_output=kwargs.get("last_voice_output", current.last_voice_output),
         voice_engine=kwargs.get("voice_engine", current.voice_engine),
         voice_fast=kwargs.get("voice_fast", current.voice_fast),
+        remove_watermark=kwargs.get("remove_watermark", current.remove_watermark),
+        watermark_template=kwargs.get("watermark_template", current.watermark_template),
+        watermark_method=kwargs.get("watermark_method", current.watermark_method),
+        watermark_threshold=kwargs.get("watermark_threshold", current.watermark_threshold),
+        watermark_inpaint_radius=kwargs.get(
+            "watermark_inpaint_radius", current.watermark_inpaint_radius
+        ),
     )
     save(merged)
     return merged
@@ -145,6 +176,12 @@ def _clean(value: Any) -> str | None:
 def _int_or_none(value: Any) -> int | None:
     if isinstance(value, int):
         return value
+    return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
     return None
 
 

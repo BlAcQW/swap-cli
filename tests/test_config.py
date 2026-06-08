@@ -52,6 +52,36 @@ def test_save_strips_whitespace_on_load() -> None:
     assert cfg.license_key == "spaced"
 
 
+def test_watermark_fields_round_trip() -> None:
+    """Sprint 15: watermark settings save/load without disturbing other fields."""
+    config.update(
+        license_key="L1",
+        decart_api_key="dct_x",
+        remove_watermark=True,
+        watermark_template="/tmp/wm.png",
+        watermark_method="threshold",
+        watermark_threshold=0.7,
+        watermark_inpaint_radius=5,
+    )
+    cfg = config.load()
+    assert cfg.remove_watermark is True
+    assert cfg.watermark_template == "/tmp/wm.png"
+    assert cfg.watermark_method == "threshold"
+    assert cfg.watermark_threshold == 0.7
+    assert cfg.watermark_inpaint_radius == 5
+
+
+def test_watermark_defaults_when_absent() -> None:
+    """Old config files (no watermark keys) load with safe defaults."""
+    config.save(config.Config("L1", "dct_x", None, None))
+    cfg = config.load()
+    assert cfg.remove_watermark is False
+    assert cfg.watermark_template is None
+    assert cfg.watermark_method == "template"
+    assert cfg.watermark_threshold == 0.50
+    assert cfg.watermark_inpaint_radius == 3
+
+
 def test_machine_id_is_stable_and_hex_32() -> None:
     a = config.machine_id()
     b = config.machine_id()

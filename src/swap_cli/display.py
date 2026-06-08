@@ -19,6 +19,8 @@ import numpy as np
 if TYPE_CHECKING:
     from aiortc.mediastreams import MediaStreamTrack
 
+    from .watermark import WatermarkRemover
+
 
 WINDOW_TITLE = "swap — Lucy 2 live"
 
@@ -36,11 +38,16 @@ class Display:
         record_path: Path | None = None,
         on_quit: callable = lambda: None,  # type: ignore[assignment]
         virtual_camera: bool = False,
+        watermark: WatermarkRemover | None = None,
     ) -> None:
         self._track = track
         self._record_path = record_path
         self._on_quit = on_quit
         self._virtual_camera = virtual_camera
+        # Sprint 15: optional per-frame watermark remover. None = no-op.
+        # Injected as a configured instance so _loop stays thin and the
+        # remover is unit-testable in isolation.
+        self._watermark = watermark
         self._writer: cv2.VideoWriter | None = None
         # pyvirtualcam.Camera — lazy-init on first frame so we know the
         # actual width/height from Decart's stream rather than guessing.
@@ -81,6 +88,11 @@ class Display:
             while not self._stopped.is_set():
                 frame = await self._track.recv()
                 bgr = frame.to_ndarray(format="bgr24")
+                # Sprint 15: strip the Decart watermark before anything
+                # downstream sees the frame. process() never raises — it
+                # returns the frame unchanged on any failure.
+                if self._watermark is not None:
+                    bgr = self._watermark.process(bgr)
                 self._latest_bgr = bgr
                 self._maybe_init_writer(bgr.shape, fps_guess=20)
                 if self._writer is not None:
@@ -112,12 +124,48 @@ class Display:
                     self._on_quit()
                     self._stopped.set()
                     break
+                if key in (ord("w"), ord("W")):  # Sprint 15: capture watermark
+                    self._capture_watermark_template()
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001 — show + exit cleanly
             print(f"[display] error: {err}")
         finally:
             cv2.destroyAllWindows()
+
+    def _capture_watermark_template(self) -> None:
+        """Drag-select the watermark on the current frame and save it as the
+        template PNG (Sprint 15). Bound to the `w` key in the preview window.
+
+        Best used with watermark removal OFF so the badge is still visible.
+        Persists the path to config so the next session picks it up.
+        """
+        if self._latest_bgr is None:
+            print("[display] no frame yet — can't capture watermark.", flush=True)
+            return
+        try:
+            from . import config as _config
+
+            roi = cv2.selectROI(
+                "select watermark — ENTER to save, C to cancel",
+                self._latest_bgr,
+                showCrosshair=False,
+            )
+            cv2.destroyWindow("select watermark — ENTER to save, C to cancel")
+            x, y, w, h = (int(v) for v in roi)
+            if w <= 0 or h <= 0:
+                print("[display] watermark capture cancelled.", flush=True)
+                return
+            crop = self._latest_bgr[y : y + h, x : x + w]
+            dest = default_watermark_template_path()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if cv2.imwrite(str(dest), crop):
+                _config.update(watermark_template=str(dest))
+                print(f"[display] watermark template saved → {dest}", flush=True)
+            else:
+                print(f"[display] failed to write template → {dest}", flush=True)
+        except Exception as err:  # noqa: BLE001 — capture is best-effort
+            print(f"[display] watermark capture error: {err}", flush=True)
 
     def _maybe_init_writer(self, shape: tuple[int, ...], fps_guess: int) -> None:
         if self._record_path is None or self._writer is not None:
@@ -165,6 +213,15 @@ class Display:
                 "https://obsproject.com/download",
                 flush=True,
             )
+
+
+def default_watermark_template_path() -> Path:
+    """Canonical location for the captured watermark template PNG."""
+    from platformdirs import user_config_dir
+
+    from .config import APP_NAME
+
+    return Path(user_config_dir(APP_NAME)) / "watermarks" / "watermark.png"
 
 
 def default_snapshot_path() -> Path:

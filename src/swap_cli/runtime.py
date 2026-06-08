@@ -59,6 +59,13 @@ class RunOptions:
     # so video-call apps see the deepfake as a camera device. Default off
     # so legacy users / CI without the driver aren't surprised.
     virtual_camera: bool = False
+    # Sprint 15: per-frame watermark removal. Default off — same back-compat
+    # rationale as virtual_camera, plus it costs detection+inpaint latency.
+    remove_watermark: bool = False
+    watermark_template: str | None = None
+    watermark_method: str = "template"
+    watermark_threshold: float = 0.50
+    watermark_inpaint_radius: int = 3
 
 
 async def run_session(opts: RunOptions) -> None:
@@ -121,6 +128,7 @@ async def run_session(opts: RunOptions) -> None:
                             quit_event=quit_event,
                             display_box=display_box,
                             virtual_camera=opts.virtual_camera,
+                            watermark=_build_watermark_remover(opts),
                         ),
                         initial_state=ModelState(
                             prompt=Prompt(text=opts.prompt, enhance=True),
@@ -235,6 +243,44 @@ async def _maybe_start_voice(opts: RunOptions, notify: Callable[[str], None]) ->
 display_box: list[Display | None] = [None]
 
 
+def _build_watermark_remover(opts: RunOptions) -> Any:
+    """Construct a WatermarkRemover from RunOptions, or None if off.
+
+    Lazy-imported so `swap version` / `config` don't pull cv2 paths via
+    this module (consistent with the lazy decart/aiortc imports above).
+    Never raises — a misconfigured remover degrades to no removal.
+    """
+    if not opts.remove_watermark:
+        return None
+    try:
+        from .watermark import WatermarkParams, WatermarkRemover, bundled_template_path
+
+        # User's captured template wins; otherwise fall back to the bundled
+        # default so removal works out of the box (no capture step).
+        template = Path(opts.watermark_template) if opts.watermark_template else None
+        if template is None:
+            template = bundled_template_path()
+        method = "threshold" if opts.watermark_method == "threshold" else "template"
+        if method == "template" and template is None:
+            print(
+                "[runtime] watermark removal on but no template available — "
+                "run `swap capture-watermark` (or press W in the preview). "
+                "Skipping removal.",
+                flush=True,
+            )
+            return None
+        params = WatermarkParams(
+            method=method,
+            template_path=template,
+            threshold=opts.watermark_threshold,
+            inpaint_radius=opts.watermark_inpaint_radius,
+        )
+        return WatermarkRemover(params)
+    except Exception as err:  # noqa: BLE001 — removal is optional
+        print(f"[runtime] watermark remover init failed: {err}", flush=True)
+        return None
+
+
 def _on_remote_stream(
     remote_track: Any,
     *,
@@ -242,6 +288,7 @@ def _on_remote_stream(
     quit_event: asyncio.Event,
     display_box: list[Display | None],
     virtual_camera: bool = False,
+    watermark: Any = None,
 ) -> None:
     record_path = record if record is not None else None
     if record is not None and not record.is_absolute():
@@ -254,6 +301,7 @@ def _on_remote_stream(
         record_path=record_path,
         on_quit=quit_event.set,
         virtual_camera=virtual_camera,
+        watermark=watermark,
     )
     disp.start()
     display_box[0] = disp

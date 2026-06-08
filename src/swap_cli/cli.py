@@ -194,6 +194,25 @@ def run(
             ),
         ),
     ] = True,
+    remove_watermark: Annotated[
+        bool | None,
+        typer.Option(
+            "--remove-watermark/--no-remove-watermark",
+            help=(
+                "Remove the Decart 'AI Generated' watermark from each frame "
+                "via template-match + inpaint. A default template ships with "
+                "the app; capture your own with `swap capture-watermark` or "
+                "the W key. Omit to use your saved preference."
+            ),
+        ),
+    ] = None,
+    watermark_template: Annotated[
+        Path | None,
+        typer.Option(
+            "--watermark-template",
+            help="Path to the watermark template PNG (overrides saved config).",
+        ),
+    ] = None,
 ) -> None:
     """Open a realtime Decart session and stream until you press Q."""
     cfg = config.load()
@@ -219,6 +238,16 @@ def run(
         if status.cached:
             console.print(f"[dim]license: cached ({status.reason})[/dim]")
 
+    # Tri-state precedence: an explicit --remove-watermark / --no-remove-
+    # watermark wins; when omitted (None) fall back to saved config. This
+    # keeps --no-remove-watermark working even when config defaults it on.
+    wm_enabled = (
+        remove_watermark if remove_watermark is not None else cfg.remove_watermark
+    )
+    wm_template = (
+        str(watermark_template) if watermark_template else cfg.watermark_template
+    )
+
     opts = RunOptions(
         decart_api_key=cfg.decart_api_key,
         reference=reference,
@@ -227,15 +256,22 @@ def run(
         camera_device=device,
         record=record,
         virtual_camera=vcam,
+        remove_watermark=wm_enabled,
+        watermark_template=wm_template,
+        watermark_method=cfg.watermark_method,
+        watermark_threshold=cfg.watermark_threshold,
+        watermark_inpaint_radius=cfg.watermark_inpaint_radius,
     )
 
+    _wm_status = "[green]on[/green]" if opts.remove_watermark else "[dim]off[/dim]"
     console.print(
         Panel.fit(
             f"model: [bold]{opts.model_name}[/bold]\n"
             f"reference: {opts.reference or '[dim]none[/dim]'}\n"
             f"camera device: {opts.camera_device}\n"
-            f"record: {opts.record or '[dim]off[/dim]'}\n\n"
-            "[dim]Press [bold]Q[/bold] in the preview window to quit.[/dim]",
+            f"record: {opts.record or '[dim]off[/dim]'}\n"
+            f"watermark removal: {_wm_status}\n\n"
+            "[dim]Press [bold]Q[/bold] to quit · [bold]W[/bold] to capture the watermark.[/dim]",
             title="▶ swap · live",
             border_style="cyan",
         )
@@ -248,6 +284,78 @@ def run(
     except Exception as err:  # noqa: BLE001
         err_console.print(f"[red]session failed: {err}[/red]")
         raise typer.Exit(1) from err
+
+
+@app.command(name="capture-watermark")
+def capture_watermark(
+    snapshot: Annotated[
+        Path,
+        typer.Argument(
+            help="Snapshot PNG/JPG containing the watermark to crop out.",
+        ),
+    ],
+    roi: Annotated[
+        str | None,
+        typer.Option(
+            "--roi",
+            help="Crop region as x,y,w,h in pixels. Omit to crop interactively.",
+        ),
+    ] = None,
+) -> None:
+    """Crop a watermark template from a snapshot for `--remove-watermark`.
+
+    Take a normal snapshot of a live frame that shows the badge, then run
+    this to save the watermark template. Pass --roi x,y,w,h for a headless
+    crop, or omit it to drag-select in a window.
+    """
+    import cv2  # local import: cv2 isn't needed for `swap version` etc.
+
+    from .display import default_watermark_template_path
+
+    if not snapshot.exists():
+        err_console.print(f"[red]snapshot not found: {snapshot}[/red]")
+        raise typer.Exit(2)
+    img = cv2.imread(str(snapshot))
+    if img is None:
+        err_console.print(f"[red]could not read image: {snapshot}[/red]")
+        raise typer.Exit(2)
+
+    if roi:
+        try:
+            x, y, w, h = (int(v.strip()) for v in roi.split(","))
+        except ValueError as err:
+            err_console.print("[red]--roi must be 'x,y,w,h' integers[/red]")
+            raise typer.Exit(2) from err
+    else:
+        try:
+            x, y, w, h = (int(v) for v in cv2.selectROI("select watermark", img))
+            cv2.destroyAllWindows()
+        except Exception as err:  # noqa: BLE001 — headless without a display
+            err_console.print(
+                f"[red]interactive crop unavailable ({err}). Pass --roi x,y,w,h.[/red]"
+            )
+            raise typer.Exit(2) from err
+
+    if w <= 0 or h <= 0:
+        err_console.print("[red]empty selection — nothing saved.[/red]")
+        raise typer.Exit(2)
+
+    crop = img[y : y + h, x : x + w]
+    dest = default_watermark_template_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(dest), crop):
+        err_console.print(f"[red]failed to write template → {dest}[/red]")
+        raise typer.Exit(1)
+    config.update(watermark_template=str(dest))
+    console.print(
+        Panel.fit(
+            f"saved: [bold]{dest}[/bold]\n"
+            f"region: {x},{y} {w}×{h}\n\n"
+            "[dim]Run [bold]swap run --remove-watermark[/bold] to use it.[/dim]",
+            title="✂ watermark template",
+            border_style="green",
+        )
+    )
 
 
 @app.command()
@@ -1088,6 +1196,11 @@ async def _doctor() -> None:
             f"[yellow]⚠ {vcam_check.label} — {vcam_check.hint}[/yellow]",
         )
 
+    # Watermark removal template (Sprint 15) — show whether a captured
+    # template exists and is loadable, so users know if --remove-watermark
+    # will actually do anything.
+    table.add_row("watermark template", _watermark_template_label())
+
     # macOS-only: customtkinter needs Tcl/Tk >= 8.6.9. The system Python
     # ships 8.5.9 which fails silently or renders broken windows. Surface
     # this here so users know to switch to python.org Python or
@@ -1104,6 +1217,33 @@ async def _doctor() -> None:
     )
     if failures:
         sys.exit(1)
+
+
+def _watermark_template_label() -> str:
+    cfg = config.load()
+    source = "custom"
+    template = cfg.watermark_template
+    if not template:
+        from .watermark import bundled_template_path
+
+        bundled = bundled_template_path()
+        if bundled is None:
+            return "[dim]none — run `swap capture-watermark`[/dim]"
+        template = str(bundled)
+        source = "bundled default"
+    path = Path(template)
+    if not path.exists():
+        return f"[yellow]⚠ missing: {path}[/yellow]"
+    try:
+        import cv2
+
+        img = cv2.imread(str(path))
+        if img is None or img.size == 0:
+            return f"[yellow]⚠ unreadable: {path}[/yellow]"
+        h, w = img.shape[:2]
+        return f"[green]✓ {w}×{h} {path.name} ({source})[/green]"
+    except Exception:  # noqa: BLE001 — doctor must never crash
+        return f"[green]✓ {path.name} ({source})[/green]"
 
 
 def _camera_probe_label() -> str:

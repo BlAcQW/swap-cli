@@ -198,6 +198,18 @@ class SwapGUI(ctk.CTk):
             variable=self._vcam_var,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
 
+        # Sprint 15: per-frame Decart watermark removal. Defaults ON — the
+        # app ships a bundled default template so removal works out of the
+        # box; clients get a clean feed without any capture step. The toggle
+        # is read when Live is clicked (start-time); flip it off here before
+        # going Live if you ever want the raw feed.
+        self._watermark_var = tk.BooleanVar(value=True)
+        ctk.CTkSwitch(
+            opts,
+            text="Remove watermark",
+            variable=self._watermark_var,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
+
         # Model selector. Decart fixes width/height/fps per model — we display
         # the native dimensions next to each option so the user knows what
         # they're getting. There is no orientation knob: the SDK only accepts
@@ -631,11 +643,25 @@ class SwapGUI(ctk.CTk):
             microphone_device=mic_device,
             voice_output_device=out_device,
             virtual_camera=bool(self._vcam_var.get()) if hasattr(self, "_vcam_var") else True,
+            remove_watermark=(
+                bool(self._watermark_var.get())
+                if hasattr(self, "_watermark_var")
+                else False
+            ),
+            watermark_template=cfg.watermark_template,
+            watermark_method=cfg.watermark_method,
+            watermark_threshold=cfg.watermark_threshold,
+            watermark_inpaint_radius=cfg.watermark_inpaint_radius,
         )
 
         # Persist the voice id so next launch defaults to it.
         if voice_id and voice_id != cfg.last_voice_id:
             config.update(last_voice_id=voice_id)
+        # Persist the watermark toggle so it sticks across launches.
+        if hasattr(self, "_watermark_var"):
+            wm_on = bool(self._watermark_var.get())
+            if wm_on != cfg.remove_watermark:
+                config.update(remove_watermark=wm_on)
 
         self._stop_event = asyncio.Event()
         self._set_running(True)

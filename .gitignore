@@ -57,3 +57,6 @@ swap-config.toml
 # Recordings
 recordings/
 *.mp4
+
+# Watermark capture source (throwaway; cropped template lives in assets/)
+wm_source.*

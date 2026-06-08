@@ -61,6 +61,56 @@ def test_runtime_options_default_no_vcam() -> None:
     assert fields["virtual_camera"].default is False
 
 
+def test_runtime_options_default_no_watermark() -> None:
+    """Sprint 15: RunOptions.remove_watermark defaults off for back-compat."""
+    import dataclasses
+
+    if "swap_cli.camera" not in sys.modules:
+        sys.modules["swap_cli.camera"] = types.ModuleType("swap_cli.camera")
+        sys.modules["swap_cli.camera"].CameraTrack = MagicMock()  # type: ignore[attr-defined]
+
+    from swap_cli.runtime import RunOptions
+
+    fields = {f.name: f for f in dataclasses.fields(RunOptions)}
+    assert "remove_watermark" in fields
+    assert fields["remove_watermark"].default is False
+
+
+def test_display_accepts_watermark_remover() -> None:
+    """Display constructor accepts a watermark remover; default stays None
+    so legacy callers are unaffected (mirrors the vcam flag test)."""
+    from swap_cli.display import Display
+
+    fake_track = MagicMock(name="MediaStreamTrack")
+    remover = MagicMock(name="WatermarkRemover")
+
+    disp = Display(track=fake_track, watermark=remover)
+    assert disp._watermark is remover
+
+    assert Display(track=fake_track)._watermark is None
+
+
+def test_build_watermark_remover_off_returns_none(monkeypatch) -> None:
+    """runtime._build_watermark_remover returns None when removal is off,
+    so the Display gets no remover and behaves exactly as before."""
+    if "swap_cli.camera" not in sys.modules:
+        sys.modules["swap_cli.camera"] = types.ModuleType("swap_cli.camera")
+        sys.modules["swap_cli.camera"].CameraTrack = MagicMock()  # type: ignore[attr-defined]
+
+    import swap_cli.watermark as wm
+    from swap_cli.runtime import RunOptions, _build_watermark_remover
+
+    opts = RunOptions(decart_api_key="k", reference=None, prompt="p")
+    assert _build_watermark_remover(opts) is None
+
+    # Enabled but no template AND no bundled default → still None.
+    monkeypatch.setattr(wm, "bundled_template_path", lambda: None)
+    opts2 = RunOptions(
+        decart_api_key="k", reference=None, prompt="p", remove_watermark=True
+    )
+    assert _build_watermark_remover(opts2) is None
+
+
 class _FakePath:
     """Path replacement for the win32 driver-detection tests.
 

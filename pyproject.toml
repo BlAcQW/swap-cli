@@ -106,6 +106,9 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/swap_cli"]
+# Ship the bundled watermark template (and any future data assets) even
+# though *.png would otherwise be excluded by VCS-based file selection.
+artifacts = ["src/swap_cli/assets/*.png"]
 
 [tool.ruff]
 line-length = 100
