@@ -55,6 +55,9 @@ class Display:
         self._task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
         self._latest_bgr: np.ndarray | None = None
+        # Raw (pre-removal) frame, kept so the W-key capture grabs the badge
+        # even while watermark removal is on.
+        self._latest_raw_bgr: np.ndarray | None = None
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._loop())
@@ -88,6 +91,7 @@ class Display:
             while not self._stopped.is_set():
                 frame = await self._track.recv()
                 bgr = frame.to_ndarray(format="bgr24")
+                self._latest_raw_bgr = bgr  # keep the un-cleaned frame for W capture
                 # Sprint 15: strip the Decart watermark before anything
                 # downstream sees the frame. process() never raises — it
                 # returns the frame unchanged on any failure.
@@ -137,10 +141,15 @@ class Display:
         """Drag-select the watermark on the current frame and save it as the
         template PNG (Sprint 15). Bound to the `w` key in the preview window.
 
-        Best used with watermark removal OFF so the badge is still visible.
-        Persists the path to config so the next session picks it up.
+        Captures from the RAW (pre-removal) frame so it works even while
+        removal is on but not matching. Persists the path AND the frame width
+        so the multi-scale match centers exactly next session.
         """
-        if self._latest_bgr is None:
+        # Prefer the raw frame; fall back to the displayed one.
+        source = self._latest_raw_bgr
+        if source is None:
+            source = self._latest_bgr
+        if source is None:
             print("[display] no frame yet — can't capture watermark.", flush=True)
             return
         try:
@@ -148,7 +157,7 @@ class Display:
 
             roi = cv2.selectROI(
                 "select watermark — ENTER to save, C to cancel",
-                self._latest_bgr,
+                source,
                 showCrosshair=False,
             )
             cv2.destroyWindow("select watermark — ENTER to save, C to cancel")
@@ -156,12 +165,20 @@ class Display:
             if w <= 0 or h <= 0:
                 print("[display] watermark capture cancelled.", flush=True)
                 return
-            crop = self._latest_bgr[y : y + h, x : x + w]
+            crop = source[y : y + h, x : x + w]
+            frame_width = int(source.shape[1])
             dest = default_watermark_template_path()
             dest.parent.mkdir(parents=True, exist_ok=True)
             if cv2.imwrite(str(dest), crop):
-                _config.update(watermark_template=str(dest))
-                print(f"[display] watermark template saved → {dest}", flush=True)
+                _config.update(
+                    watermark_template=str(dest),
+                    watermark_template_width=frame_width,
+                )
+                print(
+                    f"[display] watermark template saved → {dest} "
+                    f"(from {frame_width}px-wide frame)",
+                    flush=True,
+                )
             else:
                 print(f"[display] failed to write template → {dest}", flush=True)
         except Exception as err:  # noqa: BLE001 — capture is best-effort

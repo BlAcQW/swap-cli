@@ -261,6 +261,7 @@ def run(
         watermark_method=cfg.watermark_method,
         watermark_threshold=cfg.watermark_threshold,
         watermark_inpaint_radius=cfg.watermark_inpaint_radius,
+        watermark_template_width=cfg.watermark_template_width,
     )
 
     _wm_status = "[green]on[/green]" if opts.remove_watermark else "[dim]off[/dim]"
@@ -1241,7 +1242,11 @@ def _watermark_template_label() -> str:
         if img is None or img.size == 0:
             return f"[yellow]⚠ unreadable: {path}[/yellow]"
         h, w = img.shape[:2]
-        return f"[green]✓ {w}×{h} {path.name} ({source})[/green]"
+        ref = cfg.watermark_template_width or 1280
+        return (
+            f"[green]✓ {w}×{h} {path.name} ({source})[/green] "
+            f"[dim]· multi-scale match (ref {ref}px)[/dim]"
+        )
     except Exception:  # noqa: BLE001 — doctor must never crash
         return f"[green]✓ {path.name} ({source})[/green]"
 

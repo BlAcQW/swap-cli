@@ -130,8 +130,17 @@ class SwapGUI(ctk.CTk):
     # ── UI build ──────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        outer = ctk.CTkFrame(self, fg_color="transparent")
-        outer.pack(fill="both", expand=True, padx=20, pady=18)
+        # Pinned bottom bar (Live/Stop + status + footer) — packed first with
+        # side="bottom" so it's always reachable even when the content above
+        # overflows. The scrollable area then takes the remaining space.
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.pack(side="bottom", fill="x", padx=20, pady=(0, 12))
+        self._bottom_bar = bottom
+
+        # Scrollable content area — everything above the action bar lives here
+        # so smaller windows can scroll instead of clipping widgets.
+        outer = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        outer.pack(side="top", fill="both", expand=True, padx=14, pady=(14, 0))
 
         # Settings (gear) button — top-right, opens the settings modal.
         title_bar = ctk.CTkFrame(outer, fg_color="transparent")
@@ -385,9 +394,10 @@ class SwapGUI(ctk.CTk):
         )
         self._disable_voice_btn.pack(side="right")
 
-        # Action buttons row
-        actions = ctk.CTkFrame(outer, fg_color="transparent")
-        actions.pack(fill="x", pady=(20, 0))
+        # Action buttons row — lives in the pinned bottom bar so Live/Stop
+        # stay visible regardless of scroll position.
+        actions = ctk.CTkFrame(bottom, fg_color="transparent")
+        actions.pack(fill="x", pady=(8, 0))
         actions.columnconfigure((0, 1, 2), weight=1, uniform="act")
 
         self._live_btn = ctk.CTkButton(
@@ -413,9 +423,9 @@ class SwapGUI(ctk.CTk):
         )
         self._stop_btn.grid(row=0, column=2, sticky="ew")
 
-        # Status bar
-        status = ctk.CTkFrame(outer, fg_color="transparent")
-        status.pack(fill="x", pady=(18, 0))
+        # Status bar (pinned)
+        status = ctk.CTkFrame(bottom, fg_color="transparent")
+        status.pack(fill="x", pady=(10, 0))
         ctk.CTkLabel(
             status,
             textvariable=self._status_var,
@@ -424,13 +434,13 @@ class SwapGUI(ctk.CTk):
             font=ctk.CTkFont(size=11),
         ).pack(fill="x")
 
-        # Footer
+        # Footer (pinned)
         ctk.CTkLabel(
-            outer,
+            bottom,
             text="swap-cli — Press Q in the preview window to stop",
             font=ctk.CTkFont(size=10),
             text_color="#6b7280",
-        ).pack(side="bottom", pady=(8, 0))
+        ).pack(pady=(8, 0))
 
     # ── Actions ───────────────────────────────────────────────────────
 
@@ -652,6 +662,7 @@ class SwapGUI(ctk.CTk):
             watermark_method=cfg.watermark_method,
             watermark_threshold=cfg.watermark_threshold,
             watermark_inpaint_radius=cfg.watermark_inpaint_radius,
+            watermark_template_width=cfg.watermark_template_width,
         )
 
         # Persist the voice id so next launch defaults to it.

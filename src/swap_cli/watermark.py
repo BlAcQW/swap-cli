@@ -60,6 +60,12 @@ class WatermarkParams:
     # ~27ms/frame at 1280x720 — within the 20fps (50ms) budget.
     detect_scale: float = 0.6
     redetect_every: int = 1  # run detection every N frames
+    # Frame width the template was authored for. Decart's negotiated output
+    # resolution varies (1088x624 and 1280x720 both seen), and matchTemplate
+    # is NOT scale-invariant, so we resize the template by frame_width/ref to
+    # center the multi-scale search on the real badge size. The bundled
+    # default was cropped from a 1280-wide frame.
+    template_ref_width: int = 1280
 
 
 # Threshold-method default region when no ROI is configured: the upper
@@ -67,6 +73,14 @@ class WatermarkParams:
 # the brightness search so we never inpaint facial highlights.
 _DEFAULT_THRESHOLD_ROI = (0.0, 0.0, 1.0, 0.45)
 _BRIGHTNESS_CUTOFF = 225  # white-text/pill detection for the threshold method
+
+# Content-scale multipliers tried around the base scale (frame_w/ref_w)
+# while the badge size is unknown. Brackets ±30% so a template authored at
+# one resolution still matches frames negotiated at another. Once a scale
+# clears the gate it is locked and the search collapses to that one scale.
+_SEARCH_MULTIPLIERS = (0.7, 0.85, 1.0, 1.15, 1.3)
+_LOG_EVERY = 20  # throttle diagnostics to ~1/sec at 20fps
+_UNLOCK_AFTER_MISSES = 15  # re-open the scale search after this many misses
 
 # Default template shipped with the package (a crop of the Decart "AI
 # Generated" pill). Lets watermark removal work out of the box without the
@@ -93,14 +107,24 @@ class WatermarkRemover:
         self._warned = False
         self._method: DetectionMethod = params.method
 
-        # Pre-compute the scaled edge template once. `_tpl_size` holds the
-        # FULL-resolution (w, h) used to size the inpaint mask.
-        self._tpl_edge: np.ndarray | None = None
-        self._tpl_size: tuple[int, int] | None = None
+        # Full-resolution grayscale template. We resize it per content-scale
+        # at detection time (matchTemplate is not scale-invariant), so we keep
+        # the original here rather than a single pre-scaled copy.
+        self._tpl_gray: np.ndarray | None = None
+        self._tpl_size: tuple[int, int] | None = None  # (w, h) at authored res
+
+        # Multi-scale state: the content scale that last matched (so steady
+        # state searches one scale), a miss counter to re-open the search, and
+        # a cache of resized+edged search templates keyed by target width px.
+        self._locked_scale: float | None = None
+        self._miss_streak = 0
+        self._tpl_cache: dict[int, np.ndarray] = {}
+        self._last_conf = 0.0
+        self._last_scale = 0.0
 
         if params.method == "template":
             self._load_template(params.template_path)
-            if self._tpl_edge is None:
+            if self._tpl_gray is None:
                 # Requested template matching but no usable PNG — fall back
                 # to the brightness method so we still do *something*.
                 print(
@@ -124,9 +148,8 @@ class WatermarkRemover:
             print(f"[watermark] template unreadable: {path}", flush=True)
             return
         h, w = tpl.shape[:2]
+        self._tpl_gray = tpl
         self._tpl_size = (w, h)
-        scaled = self._scale(tpl)
-        self._tpl_edge = self._edge(scaled) if self._params.edge_match else scaled
 
     @classmethod
     def from_config(cls, cfg: Config, *, enabled: bool) -> WatermarkRemover | None:
@@ -154,11 +177,15 @@ class WatermarkRemover:
                 flush=True,
             )
             return None
+        # A user-captured template records the frame width it was grabbed at
+        # so the scale search centers exactly; the bundled default is 1280.
+        ref_width = getattr(cfg, "watermark_template_width", None) or 1280
         params = WatermarkParams(
             method=method,
             template_path=template,
             threshold=cfg.watermark_threshold,
             inpaint_radius=cfg.watermark_inpaint_radius,
+            template_ref_width=ref_width,
         )
         return cls(params)
 
@@ -179,13 +206,24 @@ class WatermarkRemover:
 
     def _process(self, bgr: np.ndarray) -> np.ndarray:
         self._frame_idx += 1
+        if self._frame_idx == 1:
+            self._log_active(bgr.shape[:2])
+
         redetect = self._last_box is None or (
             self._frame_idx % max(1, self._params.redetect_every) == 0
         )
         if redetect:
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-            box, _conf = self._detect(gray)
+            box, conf = self._detect(gray)
             self._last_box = box
+            self._last_conf = conf
+            if box is None:
+                self._miss_streak += 1
+                if self._miss_streak >= _UNLOCK_AFTER_MISSES:
+                    self._locked_scale = None  # re-open the scale search
+            else:
+                self._miss_streak = 0
+            self._log_detection(box)
 
         box = self._last_box
         if box is None:
@@ -193,6 +231,43 @@ class WatermarkRemover:
 
         mask = self._build_mask(bgr.shape[:2], box)
         return self._inpaint(bgr, mask)
+
+    # ---- diagnostics ----------------------------------------------------------
+
+    def _log_active(self, shape: tuple[int, int]) -> None:
+        h, w = shape
+        if self._method == "threshold":
+            print(
+                f"[watermark] active · method=threshold · gate={self._params.threshold}"
+                f" · frame={w}x{h}",
+                flush=True,
+            )
+            return
+        tw, th = self._tpl_size or (0, 0)
+        print(
+            f"[watermark] active · template {tw}x{th} (ref {self._params.template_ref_width}px)"
+            f" · gate={self._params.threshold} · frame={w}x{h}",
+            flush=True,
+        )
+
+    def _log_detection(self, box: Box | None) -> None:
+        # Throttle to ~1/sec so we don't flood stdout at 20fps.
+        if self._frame_idx % _LOG_EVERY != 0:
+            return
+        if box is not None:
+            x, y, bw, bh = box
+            print(
+                f"[watermark] match conf={self._last_conf:.2f} "
+                f"scale={self._last_scale:.2f} at ({x},{y}) {bw}x{bh}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[watermark] no match · best conf={self._last_conf:.2f} < "
+                f"gate {self._params.threshold} — press W in the preview to "
+                "capture the badge.",
+                flush=True,
+            )
 
     # ---- detection ------------------------------------------------------------
 
@@ -202,24 +277,60 @@ class WatermarkRemover:
         return self._detect_template(gray)
 
     def _detect_template(self, gray: np.ndarray) -> tuple[Box | None, float]:
-        if self._tpl_edge is None or self._tpl_size is None:
+        if self._tpl_gray is None or self._tpl_size is None:
             return None, 0.0
+
+        _frame_h, frame_w = gray.shape[:2]
+        ds = self._params.detect_scale
+        # Downscale the frame once; reused across every candidate scale.
         small = self._scale(gray)
         search = self._edge(small) if self._params.edge_match else small
-        th, tw = self._tpl_edge.shape[:2]
-        if search.shape[0] < th or search.shape[1] < tw:
-            return None, 0.0
 
-        result = cv2.matchTemplate(search, self._tpl_edge, cv2.TM_CCOEFF_NORMED)
-        _min_v, max_v, _min_l, max_l = cv2.minMaxLoc(result)
-        if max_v < self._params.threshold:
-            return None, float(max_v)
+        # Center the search on the badge's expected size for this resolution.
+        base = frame_w / max(1, self._params.template_ref_width)
+        if self._locked_scale is not None:
+            candidates = (self._locked_scale,)
+        else:
+            candidates = tuple(base * m for m in _SEARCH_MULTIPLIERS)
 
-        scale = self._params.detect_scale
-        x = round(max_l[0] / scale)
-        y = round(max_l[1] / scale)
-        w, h = self._tpl_size
-        return (x, y, w, h), float(max_v)
+        tpl_w, tpl_h = self._tpl_size
+        best_conf = 0.0
+        best_loc: tuple[int, int] | None = None
+        best_cs = 0.0
+        for cs in candidates:
+            # Final search-template size = authored x content-scale x detect-scale.
+            sw = round(tpl_w * cs * ds)
+            sh = round(tpl_h * cs * ds)
+            if sw < 8 or sh < 8 or sh > search.shape[0] or sw > search.shape[1]:
+                continue
+            tpl = self._scaled_template(sw, sh)
+            result = cv2.matchTemplate(search, tpl, cv2.TM_CCOEFF_NORMED)
+            _mn, mx, _ml, ml = cv2.minMaxLoc(result)
+            if mx > best_conf:
+                best_conf, best_loc, best_cs = float(mx), ml, cs
+
+        if best_loc is None or best_conf < self._params.threshold:
+            return None, best_conf
+
+        # Lock the winning scale so steady state searches just one.
+        self._locked_scale = best_cs
+        self._last_scale = best_cs
+        x = round(best_loc[0] / ds)
+        y = round(best_loc[1] / ds)
+        w = round(tpl_w * best_cs)
+        h = round(tpl_h * best_cs)
+        return (x, y, w, h), best_conf
+
+    def _scaled_template(self, sw: int, sh: int) -> np.ndarray:
+        """Resize (and edge) the full-res template to a search size, cached."""
+        cached = self._tpl_cache.get(sw)
+        if cached is not None and cached.shape[0] == sh:
+            return cached
+        assert self._tpl_gray is not None
+        resized = cv2.resize(self._tpl_gray, (sw, sh), interpolation=cv2.INTER_AREA)
+        tpl = self._edge(resized) if self._params.edge_match else resized
+        self._tpl_cache[sw] = tpl
+        return tpl
 
     def _detect_threshold(self, gray: np.ndarray) -> tuple[Box | None, float]:
         h, w = gray.shape[:2]

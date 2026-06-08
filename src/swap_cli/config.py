@@ -47,6 +47,10 @@ class Config:
     watermark_method: str = "template"  # "template" | "threshold"
     watermark_threshold: float = 0.50  # matchTemplate confidence gate (0..1)
     watermark_inpaint_radius: int = 3
+    # Frame width the captured template was grabbed at. Decart's output
+    # resolution varies, so this centers the multi-scale match exactly for a
+    # user-captured template. None → the 1280px bundled-default assumption.
+    watermark_template_width: int | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -83,6 +87,7 @@ def load() -> Config:
         watermark_method=_clean(data.get("watermark_method")) or "template",
         watermark_threshold=_float_or_none(data.get("watermark_threshold")) or 0.50,
         watermark_inpaint_radius=_int_or_none(data.get("watermark_inpaint_radius")) or 3,
+        watermark_template_width=_int_or_none(data.get("watermark_template_width")),
     )
 
 
@@ -122,6 +127,8 @@ def save(cfg: Config) -> Path:
         body.append(f"watermark_threshold = {cfg.watermark_threshold}")
     if cfg.watermark_inpaint_radius != 3:
         body.append(f"watermark_inpaint_radius = {cfg.watermark_inpaint_radius}")
+    if cfg.watermark_template_width is not None:
+        body.append(f"watermark_template_width = {cfg.watermark_template_width}")
 
     text = "\n".join(body) + "\n"
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -154,6 +161,9 @@ def update(**kwargs: Any) -> Config:
         watermark_threshold=kwargs.get("watermark_threshold", current.watermark_threshold),
         watermark_inpaint_radius=kwargs.get(
             "watermark_inpaint_radius", current.watermark_inpaint_radius
+        ),
+        watermark_template_width=kwargs.get(
+            "watermark_template_width", current.watermark_template_width
         ),
     )
     save(merged)

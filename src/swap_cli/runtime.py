@@ -66,6 +66,7 @@ class RunOptions:
     watermark_method: str = "template"
     watermark_threshold: float = 0.50
     watermark_inpaint_radius: int = 3
+    watermark_template_width: int | None = None  # capture-frame width (scale center)
 
 
 async def run_session(opts: RunOptions) -> None:
@@ -269,11 +270,24 @@ def _build_watermark_remover(opts: RunOptions) -> Any:
                 flush=True,
             )
             return None
+        # A captured template carries the width it was grabbed at so the
+        # scale search centers exactly; the bundled default assumes 1280.
+        is_custom = bool(opts.watermark_template)
+        ref_width = opts.watermark_template_width or 1280
         params = WatermarkParams(
             method=method,
             template_path=template,
             threshold=opts.watermark_threshold,
             inpaint_radius=opts.watermark_inpaint_radius,
+            template_ref_width=ref_width,
+        )
+        # Log on SUCCESS — previously silent, which is why a non-matching
+        # session showed no `[watermark]` lines at all.
+        print(
+            f"[runtime] watermark removal ON · template="
+            f"{'custom' if is_custom else 'bundled'} ({template.name}) · "
+            f"method={method} · gate={opts.watermark_threshold}",
+            flush=True,
         )
         return WatermarkRemover(params)
     except Exception as err:  # noqa: BLE001 — removal is optional
