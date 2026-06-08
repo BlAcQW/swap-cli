@@ -23,6 +23,10 @@ sys.path.insert(0, str(ROOT / "src"))
 _stub_cv2 = sys.modules.get("cv2")
 if _stub_cv2 is not None and not hasattr(_stub_cv2, "imwrite"):
     del sys.modules["cv2"]
+    # Drop swap_cli modules that bound the stub cv2 at import (e.g. via
+    # test_virtual_camera) so they re-import against the real cv2 below.
+    for _m in ("swap_cli.watermark", "swap_cli.display"):
+        sys.modules.pop(_m, None)
 
 cv2 = pytest.importorskip("cv2")
 np = pytest.importorskip("numpy")
@@ -250,6 +254,71 @@ def test_process_pass_through_when_below_threshold(tmp_path: Path) -> None:
     frame = _stamp(_textured_frame(), _make_watermark_template(), 300, 60)
     out = rem.process(frame)
     assert np.array_equal(out, frame)
+
+
+# --- capture hot-reload -----------------------------------------------------
+
+def test_capture_hot_reloads_remover(monkeypatch, tmp_path: Path) -> None:
+    """Pressing W mid-session must swap in the captured template live, not
+    only on the next run (the Sprint 15b bug)."""
+    from unittest.mock import MagicMock
+
+    from swap_cli import config as cfgmod
+    from swap_cli import display as disp_mod
+    from swap_cli.display import Display
+
+    # Isolate config + template path to tmp.
+    monkeypatch.setattr(cfgmod, "config_path", lambda: tmp_path / "config.toml")
+    dest = tmp_path / "captured.png"
+    monkeypatch.setattr(disp_mod, "default_watermark_template_path", lambda: dest)
+
+    # A 1088-wide raw frame with the badge stamped at a known spot.
+    raw = _blank_frame(1088, 624)
+    badge = _make_watermark_template()
+    bx, by = 500, 120
+    raw[by : by + badge.shape[0], bx : bx + badge.shape[1]] = badge
+
+    disp = Display(track=MagicMock(), watermark=None)
+    disp._latest_raw_bgr = raw
+
+    # User drags a box around the badge.
+    monkeypatch.setattr(
+        cv2, "selectROI",
+        lambda *a, **k: (bx, by, badge.shape[1], badge.shape[0]),
+    )
+    monkeypatch.setattr(cv2, "destroyWindow", lambda *a, **k: None)
+
+    disp._capture_watermark_template()
+
+    # Hot-reloaded: a live remover now exists, built from the captured crop.
+    assert disp._watermark is not None
+    assert disp._watermark._tpl_size == (badge.shape[1], badge.shape[0])
+    # Config persisted the template + the capture-frame width.
+    cfg = cfgmod.load()
+    assert cfg.watermark_template == str(dest)
+    assert cfg.watermark_template_width == 1088
+    # And the remover centers its scale search on that width.
+    assert disp._watermark._params.template_ref_width == 1088
+
+
+def test_capture_rejects_tiny_selection(monkeypatch, tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    from swap_cli import config as cfgmod
+    from swap_cli import display as disp_mod
+    from swap_cli.display import Display
+
+    monkeypatch.setattr(cfgmod, "config_path", lambda: tmp_path / "config.toml")
+    monkeypatch.setattr(disp_mod, "default_watermark_template_path",
+                        lambda: tmp_path / "captured.png")
+    disp = Display(track=MagicMock(), watermark=None)
+    disp._latest_raw_bgr = _blank_frame(1088, 624)
+    monkeypatch.setattr(cv2, "selectROI", lambda *a, **k: (10, 10, 5, 5))  # too small
+    monkeypatch.setattr(cv2, "destroyWindow", lambda *a, **k: None)
+
+    disp._capture_watermark_template()
+    assert disp._watermark is None  # nothing swapped in
+    assert not (tmp_path / "captured.png").exists()  # nothing saved
 
 
 # --- factory ---------------------------------------------------------------

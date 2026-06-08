@@ -143,7 +143,8 @@ class Display:
 
         Captures from the RAW (pre-removal) frame so it works even while
         removal is on but not matching. Persists the path AND the frame width
-        so the multi-scale match centers exactly next session.
+        so the multi-scale match centers exactly, then HOT-RELOADS the live
+        remover so removal starts immediately — no restart needed.
         """
         # Prefer the raw frame; fall back to the displayed one.
         source = self._latest_raw_bgr
@@ -165,22 +166,45 @@ class Display:
             if w <= 0 or h <= 0:
                 print("[display] watermark capture cancelled.", flush=True)
                 return
+            # Guard against a stray click saving a junk template that then
+            # matches nothing — the badge is ~150–260px wide.
+            if w < 20 or h < 10:
+                print(
+                    f"[display] selection too small ({w}x{h}) — press W again "
+                    "and drag a box around the whole badge.",
+                    flush=True,
+                )
+                return
             crop = source[y : y + h, x : x + w]
             frame_width = int(source.shape[1])
             dest = default_watermark_template_path()
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if cv2.imwrite(str(dest), crop):
-                _config.update(
-                    watermark_template=str(dest),
-                    watermark_template_width=frame_width,
-                )
+            if not cv2.imwrite(str(dest), crop):
+                print(f"[display] failed to write template → {dest}", flush=True)
+                return
+            _config.update(
+                watermark_template=str(dest),
+                watermark_template_width=frame_width,
+            )
+            print(
+                f"[display] watermark template saved → {dest} "
+                f"(from {frame_width}px-wide frame)",
+                flush=True,
+            )
+            # Hot-reload: rebuild the live remover from the just-saved config so
+            # removal starts THIS frame — no restart. Pressing W is a clear
+            # intent to remove, so we enable even if the toggle was off.
+            from .watermark import WatermarkRemover
+
+            new = WatermarkRemover.from_config(_config.load(), enabled=True)
+            if new is not None:
+                self._watermark = new
                 print(
-                    f"[display] watermark template saved → {dest} "
-                    f"(from {frame_width}px-wide frame)",
+                    "[display] watermark removal now using the captured template "
+                    "(live) — if the badge is still visible, press W again and "
+                    "box it tighter.",
                     flush=True,
                 )
-            else:
-                print(f"[display] failed to write template → {dest}", flush=True)
         except Exception as err:  # noqa: BLE001 — capture is best-effort
             print(f"[display] watermark capture error: {err}", flush=True)
 
