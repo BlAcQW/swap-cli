@@ -227,8 +227,8 @@ def test_process_never_raises(tmp_path: Path, capsys) -> None:
 
 def test_diagnostics_active_logged_once_and_throttled(tmp_path: Path, capsys) -> None:
     """No silent failure (the original bug) and no per-frame flood."""
-    rem = _remover(tmp_path, threshold=0.99)  # gate guarantees 'no match'
-    frame = _stamp(_textured_frame(), _make_watermark_template(), 300, 60)
+    rem = _remover(tmp_path, threshold=0.5)
+    frame = _textured_frame()  # no badge → genuine 'no match' every frame
     for _ in range(45):
         rem.process(frame)
     out = capsys.readouterr().out
@@ -250,8 +250,9 @@ def test_diagnostics_reports_match(tmp_path: Path, capsys) -> None:
 
 
 def test_process_pass_through_when_below_threshold(tmp_path: Path) -> None:
-    rem = _remover(tmp_path, threshold=0.99)  # impossible gate
-    frame = _stamp(_textured_frame(), _make_watermark_template(), 300, 60)
+    # No badge in the frame → confidence below gate → frame returned as-is.
+    rem = _remover(tmp_path, threshold=0.5)
+    frame = _textured_frame()
     out = rem.process(frame)
     assert np.array_equal(out, frame)
 

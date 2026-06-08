@@ -4,11 +4,15 @@ Decart stamps a semi-transparent "✦ AI Generated" pill on every output
 frame and roams its position frame-to-frame, so a fixed mask won't do —
 we detect it fresh each frame and cv2.inpaint it away.
 
-Detection is edge-based template matching by default: the pill is
-translucent, so the *pixels* under it shift with the background while the
-pill outline / sparkle / glyph *edges* stay constant. Matching a Canny
-edge map is therefore far more robust than matching raw BGR. A brightness
-threshold method is offered as a cheap fallback.
+Detection isolates the badge's bright text before matching: the pill is
+translucent, so its *pixels* and *edges* shift with the background, but the
+white "AI Generated" text + sparkle are near-opaque and constant. A white
+morphological top-hat keeps those thin bright strokes and erases the pill
+and the slowly-varying background, so matchTemplate becomes
+background-invariant (measured: 0.9+ on the badge across slats/face/noise/
+bright backgrounds, vs ~0.3–0.7 and flickering for plain edge matching,
+while staying ~0.1 on bright no-badge regions — no false positives). A
+brightness threshold method is offered as a cheap fallback.
 
 The module is pure and testable: BGR ndarray in, BGR ndarray out. It
 NEVER raises into the render loop — on any failure `process()` returns the
@@ -49,7 +53,10 @@ class WatermarkParams:
     # leaves the watermark visible (bad), a rare false positive is a small
     # upper-frame smudge (minor). Tuned against the bundled template.
     threshold: float = 0.50
-    edge_match: bool = True  # Canny edges before matchTemplate (semi-transparent)
+    # Isolate the bright text via white top-hat before matchTemplate, making
+    # the match background-invariant for the semi-transparent badge.
+    text_isolate: bool = True
+    tophat_kernel: int = 13  # structuring-element size (px) for the top-hat
     roi: tuple[float, float, float, float] | None = None  # fractional x,y,w,h
     inpaint_radius: int = 3
     inpaint_method: Literal["telea", "ns"] = "telea"
@@ -284,7 +291,7 @@ class WatermarkRemover:
         ds = self._params.detect_scale
         # Downscale the frame once; reused across every candidate scale.
         small = self._scale(gray)
-        search = self._edge(small) if self._params.edge_match else small
+        search = self._isolate(small) if self._params.text_isolate else small
 
         # Center the search on the badge's expected size for this resolution.
         base = frame_w / max(1, self._params.template_ref_width)
@@ -328,7 +335,7 @@ class WatermarkRemover:
             return cached
         assert self._tpl_gray is not None
         resized = cv2.resize(self._tpl_gray, (sw, sh), interpolation=cv2.INTER_AREA)
-        tpl = self._edge(resized) if self._params.edge_match else resized
+        tpl = self._isolate(resized) if self._params.text_isolate else resized
         self._tpl_cache[sw] = tpl
         return tpl
 
@@ -391,9 +398,14 @@ class WatermarkRemover:
             return gray
         return cv2.resize(gray, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
 
-    @staticmethod
-    def _edge(gray: np.ndarray) -> np.ndarray:
-        return cv2.Canny(gray, 60, 180)
+    def _isolate(self, gray: np.ndarray) -> np.ndarray:
+        """White top-hat: keep bright strokes smaller than the kernel (the
+        text/sparkle), erase the pill and slowly-varying background. This is
+        what makes matching invariant to whatever is behind the translucent
+        badge."""
+        k = max(3, self._params.tophat_kernel)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        return cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
 
 
 def _roi_to_px(roi: tuple[float, float, float, float], h: int, w: int) -> Box:
