@@ -193,7 +193,8 @@ def test_build_mask_shape_and_dilation(tmp_path: Path) -> None:
 
 
 def test_inpaint_reduces_watermark_energy(tmp_path: Path) -> None:
-    rem = _remover(tmp_path)
+    # Pure-inpaint path (temporal disabled): one frame, badge filled by guess.
+    rem = _remover(tmp_path, temporal=False)
     clean = _textured_frame()
     tpl = _make_watermark_template()
     x, y = 300, 60
@@ -205,6 +206,65 @@ def test_inpaint_reduces_watermark_energy(tmp_path: Path) -> None:
     before = np.abs(dirty[region].astype(int) - clean[region].astype(int)).mean()
     after = np.abs(cleaned[region].astype(int) - clean[region].astype(int)).mean()
     assert after < before  # watermark energy materially reduced
+
+
+# --- temporal recovery -----------------------------------------------------
+
+def test_temporal_recovery_restores_real_pixels(tmp_path: Path) -> None:
+    """The badge moves, so a covered location was clean a moment ago →
+    restored from real pixels (near-zero error), far better than inpaint."""
+    rem = _remover(tmp_path, threshold=0.3)  # temporal on by default
+    clean = _textured_frame()
+    tpl = _make_watermark_template()
+
+    # Frame 1: badge at A. Frame 2: badge moved to B (A is now revealed and
+    # learned into the clean plate; B was clean in frame 1).
+    pos_a, pos_b = (120, 60), (400, 60)
+    rem.process(_stamp(clean, tpl, *pos_a))
+    out = rem.process(_stamp(clean, tpl, *pos_b))
+
+    bx, by = pos_b
+    region = (slice(by, by + WM_H), slice(bx, bx + WM_W))
+    temporal_err = np.abs(out[region].astype(int) - clean[region].astype(int)).mean()
+
+    # Compare with what pure inpaint would leave on that frame.
+    m = np.zeros((FRAME_H, FRAME_W), np.uint8)
+    m[by : by + WM_H, bx : bx + WM_W] = 255
+    ip = cv2.inpaint(_stamp(clean, tpl, *pos_b), m, 3, cv2.INPAINT_TELEA)
+    inpaint_err = np.abs(ip[region].astype(int) - clean[region].astype(int)).mean()
+
+    assert temporal_err < 2.0  # essentially the real background restored
+    assert temporal_err < inpaint_err  # and materially cleaner than a guess
+
+
+def test_temporal_plate_updates_where_uncovered(tmp_path: Path) -> None:
+    rem = _remover(tmp_path, threshold=0.3)
+    frame = _stamp(_textured_frame(), _make_watermark_template(), 300, 60)
+    rem.process(frame)
+    assert rem._clean_plate is not None and rem._age is not None
+    # A corner far from the badge must be 'fresh' and match the live frame.
+    assert rem._age[10, 10] == 0
+    assert np.array_equal(rem._clean_plate[10, 10], frame[10, 10])
+
+
+def test_stale_falls_back_to_inpaint(tmp_path: Path) -> None:
+    rem = _remover(tmp_path, threshold=0.3, temporal_max_stale=3)
+    clean = _textured_frame()
+    dirty = _stamp(clean, _make_watermark_template(), 300, 60)  # badge parked
+    for _ in range(6):  # hold past max_stale
+        rem.process(dirty)
+    assert "inpaint" in rem._last_fill  # fallback engaged when stuck
+
+
+def test_buffers_reinit_on_frame_size_change(tmp_path: Path) -> None:
+    rem = _remover(tmp_path, threshold=0.3)
+    rem.process(_stamp(_textured_frame(), _make_watermark_template(), 300, 60))
+    assert rem._clean_plate.shape[:2] == (FRAME_H, FRAME_W)
+    # A differently-sized frame must rebuild the buffers, not index-error.
+    big = np.full((FRAME_H * 2, FRAME_W * 2, 3), 90, np.uint8)
+    out = rem._restore(big, (100, 100, WM_W, WM_H))
+    assert out.shape == big.shape
+    assert rem._clean_plate.shape[:2] == (FRAME_H * 2, FRAME_W * 2)
 
 
 # --- resilience ------------------------------------------------------------

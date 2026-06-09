@@ -60,13 +60,20 @@ class WatermarkParams:
     roi: tuple[float, float, float, float] | None = None  # fractional x,y,w,h
     inpaint_radius: int = 3
     inpaint_method: Literal["telea", "ns"] = "telea"
-    dilation: int = 6  # px to grow the mask before inpaint
-    feather: int = 2  # gaussian blur radius on mask edges
+    dilation: int = 3  # px to grow the footprint (badge edge / anti-alias)
+    feather: int = 3  # gaussian blur radius for the seam blend
     # Downscale for detection. 0.6 keeps enough edge detail for the
     # semi-transparent pill (0.5 lost too much and missed) while staying
     # ~27ms/frame at 1280x720 — within the 20fps (50ms) budget.
     detect_scale: float = 0.6
     redetect_every: int = 1  # run detection every N frames
+    # Temporal recovery: the badge roams, so a covered pixel was visible
+    # recently. Fill the footprint from a "clean plate" of the most-recent
+    # uncovered value (real pixels, no inpaint trace). A pixel stuck under
+    # the badge longer than temporal_max_stale frames falls back to a tight
+    # inpaint. Set temporal=False to use plain inpaint only.
+    temporal: bool = True
+    temporal_max_stale: int = 12  # ~0.6s at 20fps
     # Frame width the template was authored for. Decart's negotiated output
     # resolution varies (1088x624 and 1280x720 both seen), and matchTemplate
     # is NOT scale-invariant, so we resize the template by frame_width/ref to
@@ -128,6 +135,14 @@ class WatermarkRemover:
         self._tpl_cache: dict[int, np.ndarray] = {}
         self._last_conf = 0.0
         self._last_scale = 0.0
+
+        # Temporal recovery state: a per-pixel "clean plate" (most-recent
+        # uncovered value) and an age map (frames since last seen uncovered).
+        # Lazily sized to the first frame; rebuilt if the frame size changes.
+        self._clean_plate: np.ndarray | None = None
+        self._age: np.ndarray | None = None
+        self._last_fill = "none"
+        self._last_stale_frac = 0.0
 
         if params.method == "template":
             self._load_template(params.template_path)
@@ -236,6 +251,9 @@ class WatermarkRemover:
         if box is None:
             return bgr  # watermark absent / not confident — pass through
 
+        if self._params.temporal:
+            return self._restore(bgr, box)
+        # Plain-inpaint path (temporal disabled).
         mask = self._build_mask(bgr.shape[:2], box)
         return self._inpaint(bgr, mask)
 
@@ -263,9 +281,12 @@ class WatermarkRemover:
             return
         if box is not None:
             x, y, bw, bh = box
+            fill = ""
+            if self._params.temporal:
+                fill = f" fill={self._last_fill} stale={self._last_stale_frac * 100:.0f}%"
             print(
                 f"[watermark] match conf={self._last_conf:.2f} "
-                f"scale={self._last_scale:.2f} at ({x},{y}) {bw}x{bh}",
+                f"scale={self._last_scale:.2f} at ({x},{y}) {bw}x{bh}{fill}",
                 flush=True,
             )
         else:
@@ -389,6 +410,118 @@ class WatermarkRemover:
         # cv2.inpaint wants a binary (0/255) single-channel mask.
         binary = (mask > 0).astype(np.uint8) * 255
         return cv2.inpaint(bgr, binary, self._params.inpaint_radius, flag)
+
+    # ---- temporal recovery ----------------------------------------------------
+
+    def _restore(self, bgr: np.ndarray, box: Box) -> np.ndarray:
+        """Fill the badge footprint with real pixels from a per-pixel "clean
+        plate" (the most-recent uncovered value), since the roaming badge
+        reveals every location moments before/after it covers it. Pixels stuck
+        under the badge longer than `temporal_max_stale` fall back to a tight
+        inpaint. A feathered seam blends the boundary."""
+        h, w = bgr.shape[:2]
+        max_stale = self._params.temporal_max_stale
+
+        # (Re)initialise buffers on first frame or a resolution change. Age
+        # starts "stale" everywhere so a pixel is only trusted once we've
+        # actually seen it uncovered (avoids baking in the frame-1 badge).
+        if (
+            self._clean_plate is None
+            or self._age is None
+            or self._clean_plate.shape[:2] != (h, w)
+        ):
+            self._clean_plate = bgr.copy()
+            self._age = np.full((h, w), max_stale + 1, dtype=np.int32)
+
+        # Footprint = the box (translucent pill + text), grown a little.
+        x, y, bw, bh = box
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(w, x + bw), min(h, y + bh)
+        footprint = np.zeros((h, w), dtype=np.uint8)
+        if x1 > x0 and y1 > y0:
+            footprint[y0:y1, x0:x1] = 255
+        if self._params.dilation > 0:
+            k = 2 * self._params.dilation + 1
+            footprint = cv2.dilate(footprint, np.ones((k, k), np.uint8))
+
+        covered = footprint > 0
+        # Refresh the plate everywhere the badge ISN'T (fast: copy the whole
+        # frame, then revert the few covered pixels to their last-clean value)
+        # — far cheaper than fancy-indexing ~99% of the frame.
+        prev_plate = self._clean_plate
+        self._clean_plate = bgr.copy()
+        self._clean_plate[covered] = prev_plate[covered]
+        self._age[~covered] = 0
+        self._age[covered] += 1
+
+        # All remaining work is localised to the footprint's bounding box (+a
+        # margin for feather/inpaint), so cost is O(badge area), not O(frame).
+        if not covered.any():
+            return bgr
+        margin = self._params.feather + self._params.inpaint_radius + 2
+        sx0, sy0 = max(0, x0 - margin), max(0, y0 - margin)
+        sx1, sy1 = min(w, x1 + margin), min(h, y1 + margin)
+        sub = (slice(sy0, sy1), slice(sx0, sx1))
+
+        fp_sub = footprint[sub]
+        cov_sub = fp_sub > 0
+        age_sub = self._age[sub]
+        fresh_sub = cov_sub & (age_sub <= max_stale)
+        stale_sub = cov_sub & (age_sub > max_stale)
+
+        bgr_sub = bgr[sub]
+        filled = bgr_sub.copy()
+        filled[fresh_sub] = self._clean_plate[sub][fresh_sub]  # real recent pixels
+
+        stale_frac = 0.0
+        if stale_sub.any():
+            # Tight fallback: inpaint only the actual badge strokes in the
+            # stale area, so the rare hallucination stays minimal.
+            shape = self._badge_shape(bgr_sub)
+            inpaint_mask = ((stale_sub & (shape > 0)).astype(np.uint8)) * 255
+            if int(cv2.countNonZero(inpaint_mask)) == 0:
+                inpaint_mask = (stale_sub.astype(np.uint8)) * 255
+            flag = (
+                cv2.INPAINT_NS
+                if self._params.inpaint_method == "ns"
+                else cv2.INPAINT_TELEA
+            )
+            patched = cv2.inpaint(filled, inpaint_mask, self._params.inpaint_radius, flag)
+            sel = inpaint_mask > 0
+            filled[sel] = patched[sel]
+            stale_frac = float(stale_sub.sum()) / max(1, int(cov_sub.sum()))
+
+        self._last_fill = "temporal+inpaint" if stale_frac > 0 else "temporal"
+        self._last_stale_frac = stale_frac
+
+        # Feathered seam (local) so a plate/exposure mismatch shows no hard edge.
+        if self._params.feather > 0:
+            k = 2 * self._params.feather + 1
+            alpha = cv2.GaussianBlur(fp_sub, (k, k), 0).astype(np.float32) / 255.0
+        else:
+            alpha = cov_sub.astype(np.float32)
+        alpha = alpha[:, :, None]
+        blended = bgr_sub.astype(np.float32) * (1.0 - alpha) + filled.astype(np.float32) * alpha
+
+        out = bgr.copy()
+        out[sub] = blended.astype(np.uint8)
+        return out
+
+    def _badge_shape(self, bgr_sub: np.ndarray) -> np.ndarray:
+        """Mask of the badge's bright strokes in a frame sub-image (which
+        still shows the badge), via a full-res white top-hat. Kernel is scaled
+        up from the downscaled detector's so it isolates the same physical
+        strokes at full resolution. Used to keep the inpaint fallback tight."""
+        if bgr_sub.size == 0:
+            return np.zeros(bgr_sub.shape[:2], dtype=np.uint8)
+        region = cv2.cvtColor(bgr_sub, cv2.COLOR_BGR2GRAY)
+        ksz = max(3, round(self._params.tophat_kernel / max(0.1, self._params.detect_scale)))
+        if ksz % 2 == 0:
+            ksz += 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+        top = cv2.morphologyEx(region, cv2.MORPH_TOPHAT, kernel)
+        _ret, strokes = cv2.threshold(top, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return cv2.dilate(strokes, np.ones((3, 3), np.uint8))
 
     # ---- small utilities ------------------------------------------------------
 
