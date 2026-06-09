@@ -87,12 +87,22 @@ class WatermarkParams:
     # miss we reuse the last confident box for up to hold_frames (the badge
     # barely moves in that span) so removal stays steady.
     hold_frames: int = 15
+    # When tracking, search the match map within a window of this fraction of
+    # frame width around the badge's last position, so a faint badge isn't lost
+    # to a far background look-alike (the wrong-location "full badge" misses).
+    track_window_frac: float = 0.16
     # Temporal recovery: the badge roams, so a covered pixel was visible
     # recently. Fill the footprint from a "clean plate" of the most-recent
     # uncovered value (real pixels, no inpaint trace). A pixel stuck under
     # the badge longer than temporal_max_stale frames falls back to a tight
     # inpaint. Set temporal=False to use plain inpaint only.
     temporal: bool = True
+    # Motion-aware fill: when the badge is over a MOVING region (the subject
+    # shaking their head / waving), the clean plate is out of date, so fill by
+    # inpainting the current surroundings instead of showing a stale ghost.
+    # Over a static background we keep using the (trace-free) clean plate.
+    motion_aware: bool = True
+    motion_thresh: float = 7.0  # mean abs diff (0–255) in the footprint's ring
     # How long a covered pixel keeps using its clean-plate value before the
     # tight-inpaint fallback. The badge SLIDES, so a pixel is covered for tens
     # of frames while the static background behind it stays valid — 90 frames
@@ -166,6 +176,8 @@ class WatermarkRemover:
         self._held_box: Box | None = None
         self._hold_count = 0
         self._gate_mode = "acquire"  # "acquire" | "maintain" (hysteresis)
+        self._last_center: tuple[int, int] | None = None  # for local-search tracking
+        self._prev_bgr: np.ndarray | None = None  # for motion-aware fill
 
         # Temporal recovery state: a per-pixel "clean plate" (most-recent
         # uncovered value) and an age map (frames since last seen uncovered).
@@ -281,6 +293,7 @@ class WatermarkRemover:
                 self._held_box = box
                 self._hold_count = 0
                 self._miss_streak = 0
+                self._last_center = (box[0] + box[2] // 2, box[1] + box[3] // 2)
             else:
                 self._miss_streak += 1
                 # Coast on the last box through brief dips (track-and-hold).
@@ -292,6 +305,7 @@ class WatermarkRemover:
                     # constant so the box can't drift to a wrong scale.
                     self._held_box = None
                     self._hold_count = 0
+                    self._last_center = None
                     self._locked_scale = None
             self._log_detection(self._held_box, accepted)
 
@@ -377,6 +391,12 @@ class WatermarkRemover:
         best_conf = 0.0
         best_loc: tuple[int, int] | None = None
         best_cs = 0.0
+        # When tracking, also find the best peak in a window around the badge's
+        # last position, so a faint badge isn't lost to a far look-alike.
+        tracking = self._locked_scale is not None and self._last_center is not None
+        local_conf = 0.0
+        local_loc: tuple[int, int] | None = None
+        local_cs = 0.0
         for cs in candidates:
             # Final search-template size = authored x content-scale x detect-scale.
             sw = round(tpl_w * cs * ds)
@@ -388,6 +408,17 @@ class WatermarkRemover:
             _mn, mx, _ml, ml = cv2.minMaxLoc(result)
             if mx > best_conf:
                 best_conf, best_loc, best_cs = float(mx), ml, cs
+            if tracking:
+                lc, ll = self._local_peak(result, sw, sh, ds, frame_w)
+                if ll is not None and lc > local_conf:
+                    local_conf, local_loc, local_cs = lc, ll, cs
+
+        # Prefer the local (near-the-badge) peak while tracking, unless the
+        # global peak is CONFIDENT and elsewhere (a genuine fast move / re-acquire).
+        if tracking and local_loc is not None:
+            global_far = best_loc != local_loc
+            if not (best_conf >= self._params.threshold and global_far):
+                best_conf, best_loc, best_cs = local_conf, local_loc, local_cs
 
         if best_loc is None:
             return None, best_conf
@@ -405,6 +436,30 @@ class WatermarkRemover:
         w = round(tpl_w * best_cs)
         h = round(tpl_h * best_cs)
         return (x, y, w, h), best_conf
+
+    def _local_peak(
+        self, result: np.ndarray, sw: int, sh: int, ds: float, frame_w: int
+    ) -> tuple[float, tuple[int, int] | None]:
+        """Best match within a window around the badge's last center, so a far
+        background look-alike can't steal the lock when the badge is faint.
+        Returns (conf, top-left loc) in result-map coords, or (0, None)."""
+        if self._last_center is None:
+            return 0.0, None
+        cx, cy = self._last_center
+        # Expected template top-left for a badge centered at (cx, cy), in the
+        # downscaled result-map coordinate space.
+        ex = round(cx * ds - sw / 2)
+        ey = round(cy * ds - sh / 2)
+        # Window grows while coasting so a moved badge is still found.
+        r = max(8, round(self._params.track_window_frac * frame_w * (1 + self._hold_count) * ds))
+        x0, y0 = max(0, ex - r), max(0, ey - r)
+        x1 = min(result.shape[1], ex + r + 1)
+        y1 = min(result.shape[0], ey + r + 1)
+        if x1 <= x0 or y1 <= y0:
+            return 0.0, None
+        sub = result[y0:y1, x0:x1]
+        _mn, mx, _ml, ml = cv2.minMaxLoc(sub)
+        return float(mx), (ml[0] + x0, ml[1] + y0)
 
     def _scaled_template(self, sw: int, sh: int) -> np.ndarray:
         """Resize (and edge) the full-res template to a search size, cached."""
@@ -482,6 +537,25 @@ class WatermarkRemover:
             min(h, y + bh + pad_y),
         )
 
+    def _scene_moving(
+        self, bgr_sub: np.ndarray, cov_sub: np.ndarray, sub: tuple
+    ) -> bool:
+        """True if the visible surroundings of the badge changed vs the previous
+        frame (the subject is moving there) — so the clean plate is stale and we
+        should inpaint instead of showing a ghost."""
+        if not self._params.motion_aware or self._prev_bgr is None:
+            return False
+        if self._prev_bgr.shape[:2] != self._clean_plate.shape[:2]:
+            return False
+        prev_sub = self._prev_bgr[sub]
+        if prev_sub.shape != bgr_sub.shape:
+            return False
+        ring = ~cov_sub  # uncovered surroundings within the sub-window
+        if not bool(ring.any()):
+            return False
+        diff = np.abs(bgr_sub[ring].astype(np.int16) - prev_sub[ring].astype(np.int16))
+        return float(diff.mean()) > self._params.motion_thresh
+
     def _restore(self, bgr: np.ndarray, box: Box) -> np.ndarray:
         """Fill the badge footprint with real pixels from a per-pixel "clean
         plate" (the most-recent uncovered value), since the roaming badge
@@ -523,6 +597,7 @@ class WatermarkRemover:
         # All remaining work is localised to the footprint's bounding box (+a
         # margin for feather/inpaint), so cost is O(badge area), not O(frame).
         if not covered.any():
+            self._prev_bgr = bgr
             return bgr
         margin = self._params.feather + self._params.inpaint_radius + 2
         sx0, sy0 = max(0, x0 - margin), max(0, y0 - margin)
@@ -532,33 +607,41 @@ class WatermarkRemover:
         fp_sub = footprint[sub]
         cov_sub = fp_sub > 0
         age_sub = self._age[sub]
-        fresh_sub = cov_sub & (age_sub <= max_stale)
-        stale_sub = cov_sub & (age_sub > max_stale)
-
         bgr_sub = bgr[sub]
+        flag = cv2.INPAINT_NS if self._params.inpaint_method == "ns" else cv2.INPAINT_TELEA
+
+        # Motion-aware: is the badge over a MOVING region (the subject moving)?
+        # Compare the visible surroundings (uncovered part of the sub-window) to
+        # the previous frame. If moving, the clean plate is out of date.
+        moving = self._scene_moving(bgr_sub, cov_sub, sub)
+
         filled = bgr_sub.copy()
-        filled[fresh_sub] = self._clean_plate[sub][fresh_sub]  # real recent pixels
-
-        stale_frac = 0.0
-        if stale_sub.any():
-            # Tight fallback: inpaint only the actual badge strokes in the
-            # stale area, so the rare hallucination stays minimal.
-            shape = self._badge_shape(bgr_sub)
-            inpaint_mask = ((stale_sub & (shape > 0)).astype(np.uint8)) * 255
-            if int(cv2.countNonZero(inpaint_mask)) == 0:
-                inpaint_mask = (stale_sub.astype(np.uint8)) * 255
-            flag = (
-                cv2.INPAINT_NS
-                if self._params.inpaint_method == "ns"
-                else cv2.INPAINT_TELEA
-            )
+        if moving:
+            # Over a moving subject: inpaint the whole footprint from the
+            # current surroundings (a neutral patch, not a stale face-ghost).
+            inpaint_mask = (cov_sub.astype(np.uint8)) * 255
             patched = cv2.inpaint(filled, inpaint_mask, self._params.inpaint_radius, flag)
-            sel = inpaint_mask > 0
-            filled[sel] = patched[sel]
-            stale_frac = float(stale_sub.sum()) / max(1, int(cov_sub.sum()))
-
-        self._last_fill = "temporal+inpaint" if stale_frac > 0 else "temporal"
-        self._last_stale_frac = stale_frac
+            filled[cov_sub] = patched[cov_sub]
+            self._last_fill = "inpaint(motion)"
+            self._last_stale_frac = 1.0
+        else:
+            fresh_sub = cov_sub & (age_sub <= max_stale)
+            stale_sub = cov_sub & (age_sub > max_stale)
+            filled[fresh_sub] = self._clean_plate[sub][fresh_sub]  # real recent pixels
+            stale_frac = 0.0
+            if stale_sub.any():
+                # Tight fallback: inpaint only the actual badge strokes in the
+                # stale area, so the rare hallucination stays minimal.
+                shape = self._badge_shape(bgr_sub)
+                inpaint_mask = ((stale_sub & (shape > 0)).astype(np.uint8)) * 255
+                if int(cv2.countNonZero(inpaint_mask)) == 0:
+                    inpaint_mask = (stale_sub.astype(np.uint8)) * 255
+                patched = cv2.inpaint(filled, inpaint_mask, self._params.inpaint_radius, flag)
+                sel = inpaint_mask > 0
+                filled[sel] = patched[sel]
+                stale_frac = float(stale_sub.sum()) / max(1, int(cov_sub.sum()))
+            self._last_fill = "temporal+inpaint" if stale_frac > 0 else "temporal"
+            self._last_stale_frac = stale_frac
 
         # Feathered seam (local) so a plate/exposure mismatch shows no hard edge.
         if self._params.feather > 0:
@@ -571,6 +654,7 @@ class WatermarkRemover:
 
         out = bgr.copy()
         out[sub] = blended.astype(np.uint8)
+        self._prev_bgr = bgr  # for next frame's motion check
         return out
 
     def _badge_shape(self, bgr_sub: np.ndarray) -> np.ndarray:

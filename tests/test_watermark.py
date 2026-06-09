@@ -399,6 +399,83 @@ def test_footprint_absorbs_location_error(tmp_path: Path) -> None:
     assert y0 < by and y1 > by + box_h
 
 
+def _text_template(tmp_path: Path) -> Path:
+    img = np.zeros((52, 200), np.uint8)
+    cv2.putText(img, "* AI Generated", (8, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 255, 2, cv2.LINE_AA)
+    p = tmp_path / "txt.png"
+    cv2.imwrite(str(p), np.dstack([img] * 3))
+    return p
+
+
+def _wide_scene(badge_xy, badge_alpha, blinds_xy=None):
+    """1088-wide frame with slats; a (possibly faint) badge, optional non-text
+    'blinds' distractor."""
+    h, w = 624, 1088
+    f = np.full((h, w), 120, np.uint8)
+    for xx in range(0, w, 24):
+        cv2.line(f, (xx, 0), (xx, h), 178, 6)
+    bw, bh = 200, 52
+    txt = np.zeros((bh, bw), np.uint8)
+    cv2.putText(txt, "* AI Generated", (8, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 255, 2, cv2.LINE_AA)
+    bx, by = badge_xy
+    roi = f[by : by + bh, bx : bx + bw]
+    m = txt > 0
+    roi[m] = (roi[m] * (1 - badge_alpha) + 235 * badge_alpha).astype(np.uint8)
+    if blinds_xy is not None:
+        dx, dy = blinds_xy
+        for yy in range(dy, dy + bh, 7):
+            cv2.line(f, (dx, yy), (dx + bw, yy), 235, 3)
+    return f
+
+
+def test_local_search_ignores_far_distractor(tmp_path: Path) -> None:
+    """A faint badge near the last position must win over a stronger far
+    background look-alike (the 'full badge showed' wrong-location misses)."""
+    rem = WatermarkRemover(
+        WatermarkParams(template_path=_text_template(tmp_path), template_ref_width=1088,
+                        detect_scale=0.6)
+    )
+    badge = (300, 250)
+    rem._detect(_wide_scene(badge, 0.7))  # acquire (strong) → locks scale
+    rem._last_center = (badge[0] + 100, badge[1] + 26)  # tracking near the badge
+
+    frame = _wide_scene(badge, 0.22, blinds_xy=(800, 470))  # faint badge + far distractor
+    box, _conf = rem._detect(frame)
+    assert box is not None
+    cx = box[0] + box[2] // 2
+    assert abs(cx - (badge[0] + 100)) < 80  # stayed on the badge, not 500px away
+
+
+def test_confident_far_match_reacquires(tmp_path: Path) -> None:
+    rem = WatermarkRemover(
+        WatermarkParams(template_path=_text_template(tmp_path), template_ref_width=1088,
+                        detect_scale=0.6)
+    )
+    rem._detect(_wide_scene((300, 250), 0.7))
+    rem._last_center = (400, 276)
+    # A strong badge far away (genuine move) must be followed, not suppressed.
+    box, conf = rem._detect(_wide_scene((760, 430), 0.7))
+    assert conf >= 0.5
+    assert abs((box[0] + box[2] // 2) - (760 + 100)) < 80
+
+
+def test_motion_aware_inpaints_when_scene_moves(tmp_path: Path) -> None:
+    """Over a moving region the fill must switch from the (stale) clean plate to
+    inpaint, so we don't show a ghost."""
+    rem = _remover(tmp_path, threshold=0.3)
+    badge = (300, 60, WM_W, WM_H)
+
+    static = _textured_frame()
+    rem._restore(static, badge)  # primes _prev_bgr + plate
+    rem._restore(static, badge)  # static surroundings → temporal
+    assert "temporal" in rem._last_fill
+
+    moved = _textured_frame()
+    cv2.rectangle(moved, (340, 40), (520, 140), (240, 230, 220), -1)  # big change nearby
+    rem._restore(moved, badge)
+    assert rem._last_fill == "inpaint(motion)"
+
+
 def test_scale_locks_only_on_confident_match(tmp_path: Path) -> None:
     """A marginal match must not change the locked scale (the 0.70 drift that
     left the badge undersized); only a confident (>= acquire) match locks it."""
