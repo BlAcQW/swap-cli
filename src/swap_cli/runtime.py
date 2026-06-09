@@ -189,17 +189,21 @@ async def run_session(opts: RunOptions) -> None:
         await quit_event.wait()
         print()  # newline after the tick line
     finally:
+        # aiortc's pc.close() can raise asyncio.CancelledError during teardown
+        # (a BaseException, NOT caught by suppress(Exception)). Suppress it too
+        # so a connection drop / abrupt stop tears down cleanly instead of
+        # escaping as a traceback.
         if voice_track is not None:
-            with suppress(Exception):
+            with suppress(Exception, asyncio.CancelledError):
                 await voice_track.stop()
         if realtime_client is not None:
-            with suppress(Exception):
+            with suppress(Exception, asyncio.CancelledError):
                 await realtime_client.disconnect()
         # Display is started inside `_on_remote_stream` and stored in display_box[0].
         if display_box and display_box[0] is not None:
-            with suppress(Exception):
+            with suppress(Exception, asyncio.CancelledError):
                 await display_box[0].stop()
-        with suppress(Exception):
+        with suppress(Exception, asyncio.CancelledError):
             await client.close()
         camera.stop()
 

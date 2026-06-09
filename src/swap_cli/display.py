@@ -133,7 +133,14 @@ class Display:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001 — show + exit cleanly
-            print(f"[display] error: {err}")
+            # The Decart remote track raises (often with an empty message) when
+            # the connection drops. End the session cleanly so it doesn't hang
+            # in "reconnecting" — the user can click Live again.
+            detail = str(err) or err.__class__.__name__
+            print(f"[display] stream ended: {detail} — stopping session.", flush=True)
+            with suppress(Exception):
+                self._on_quit()
+            self._stopped.set()
         finally:
             cv2.destroyAllWindows()
 

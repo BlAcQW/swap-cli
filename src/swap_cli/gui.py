@@ -707,6 +707,11 @@ class SwapGUI(ctk.CTk):
         print("[gui] _supervised_run entered", flush=True)
         try:
             await run_session(opts)
+        except asyncio.CancelledError:
+            # Expected on an abrupt stop / connection drop during teardown —
+            # not a real error, so no scary traceback.
+            print("[gui] session cancelled during shutdown", flush=True)
+            self.after(0, lambda: self._status_var.set("Session ended — connection interrupted."))
         except Exception as err:
             import traceback
             traceback.print_exc()

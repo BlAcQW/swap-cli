@@ -557,5 +557,47 @@ def test_roi_to_px_converts_fractions() -> None:
     assert _roi_to_px((0.5, 0.5, 0.5, 0.5), 360, 640) == (320, 180, 320, 180)
 
 
+# --- graceful shutdown (Sprint 16) -----------------------------------------
+
+def test_display_ends_session_on_stream_error(monkeypatch) -> None:
+    """When the Decart remote track raises (connection drop), Display ends the
+    session (calls on_quit) instead of hanging — and doesn't propagate."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from swap_cli import display as disp_mod
+    from swap_cli.display import Display
+
+    for fn in ("namedWindow", "resizeWindow", "imshow", "waitKey",
+               "destroyAllWindows", "setWindowProperty"):
+        monkeypatch.setattr(disp_mod.cv2, fn, lambda *a, **k: 0)
+
+    quit_called = {"v": False}
+    track = MagicMock()
+
+    async def _boom():
+        raise RuntimeError("")  # empty message, like aiortc's stream-ended
+
+    track.recv = _boom
+    disp = Display(track=track, on_quit=lambda: quit_called.__setitem__("v", True))
+    asyncio.run(disp._loop())  # must NOT raise
+
+    assert quit_called["v"] is True
+    assert disp._stopped.is_set()
+
+
+def test_suppress_pattern_catches_cancelled_error() -> None:
+    """Guards the runtime fix: suppress(Exception) does NOT catch
+    asyncio.CancelledError (a BaseException) — the tuple form does."""
+    import asyncio
+    from contextlib import suppress
+
+    with pytest.raises(asyncio.CancelledError), suppress(Exception):
+        raise asyncio.CancelledError()
+
+    with suppress(Exception, asyncio.CancelledError):
+        raise asyncio.CancelledError()  # swallowed — no raise
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
