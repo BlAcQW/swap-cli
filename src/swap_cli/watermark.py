@@ -54,9 +54,11 @@ class WatermarkParams:
     # upper-frame smudge (minor). Tuned against the bundled template.
     threshold: float = 0.50  # ACQUIRE gate: confidence to first lock onto the badge
     # MAINTAIN gate: once locked, keep tracking through dips at this lower bar.
-    # The badge is always present and roams smoothly, so sustained tracking is
-    # safe and avoids the flicker a flat low gate or a high flat gate cause.
-    maintain_threshold: float = 0.38
+    # The badge is always present, so matchTemplate's best location is the best
+    # estimate of where it is even at low confidence — following it beats
+    # coasting a stale box. Floored just above the no-badge top-hat noise
+    # (~0.1–0.2) so we don't chase pure noise.
+    maintain_threshold: float = 0.28
     # Isolate the bright text via white top-hat before matchTemplate, making
     # the match background-invariant for the semi-transparent badge.
     text_isolate: bool = True

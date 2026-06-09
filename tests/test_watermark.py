@@ -329,6 +329,27 @@ def test_hysteresis_maintains_through_dip(tmp_path: Path, monkeypatch) -> None:
     assert rem._gate_mode == "maintain"
 
 
+def test_maintain_tracks_low_conf_match(tmp_path: Path, monkeypatch) -> None:
+    """Once tracking, follow the best match down to the maintain floor instead
+    of coasting a stale box — fixes the occasional 'missed' badge on deep dips."""
+    rem = _remover(tmp_path, threshold=0.5, maintain_threshold=0.28)
+    acquired = (300, 60, WM_W, WM_H)
+    monkeypatch.setattr(rem, "_detect", lambda _g: (acquired, 0.80))  # acquire
+    rem.process(_textured_frame())
+    assert rem._held_box == acquired
+
+    # Badge moved; low-conf (0.30 ≥ 0.28) match at the NEW spot → follow it.
+    moved = (450, 200, WM_W, WM_H)
+    monkeypatch.setattr(rem, "_detect", lambda _g: (moved, 0.30))
+    rem.process(_textured_frame())
+    assert rem._held_box == moved  # tracked, not coasting at the old box
+
+    # Below the floor (0.20 < 0.28) → coast (hold the last box).
+    monkeypatch.setattr(rem, "_detect", lambda _g: ((10, 10, WM_W, WM_H), 0.20))
+    rem.process(_textured_frame())
+    assert rem._held_box == moved  # unchanged — held, not chasing noise
+
+
 def test_no_false_acquire_when_cold(tmp_path: Path, monkeypatch) -> None:
     """A 0.45 candidate from cold must NOT acquire (below the acquire gate),
     so spurious low matches can't start a false lock."""
