@@ -176,6 +176,7 @@ class Display:
                 )
                 return
             crop = source[y : y + h, x : x + w]
+            crop = _tighten_to_badge(crop)  # shrink a loose box to the strokes
             frame_width = int(source.shape[1])
             dest = default_watermark_template_path()
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -254,6 +255,39 @@ class Display:
                 "https://obsproject.com/download",
                 flush=True,
             )
+
+
+def _tighten_to_badge(crop: np.ndarray) -> np.ndarray:
+    """Shrink a (possibly loose) selection to the badge's bright strokes, so a
+    sloppy drag still yields a tight, background-free template that matches
+    with high confidence. Uses the same white top-hat as the matcher; returns
+    the original crop if no clear strokes are found."""
+    try:
+        if crop.size == 0 or crop.shape[0] < 8 or crop.shape[1] < 8:
+            return crop
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+        top = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+        _ret, strokes = cv2.threshold(top, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        ys, xs = np.where(strokes > 0)
+        if xs.size < 20:  # not enough signal — keep the user's box
+            return crop
+        m = 6  # small margin around the strokes
+        x0 = max(0, int(xs.min()) - m)
+        y0 = max(0, int(ys.min()) - m)
+        x1 = min(crop.shape[1], int(xs.max()) + m + 1)
+        y1 = min(crop.shape[0], int(ys.max()) + m + 1)
+        tight = crop[y0:y1, x0:x1]
+        if tight.shape[0] < 8 or tight.shape[1] < 20:
+            return crop
+        print(
+            f"[display] tightened selection {crop.shape[1]}x{crop.shape[0]} "
+            f"-> {tight.shape[1]}x{tight.shape[0]} (badge strokes)",
+            flush=True,
+        )
+        return tight
+    except Exception:  # noqa: BLE001 — tightening is best-effort
+        return crop
 
 
 def default_watermark_template_path() -> Path:

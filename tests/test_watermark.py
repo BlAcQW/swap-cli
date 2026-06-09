@@ -267,6 +267,63 @@ def test_buffers_reinit_on_frame_size_change(tmp_path: Path) -> None:
     assert rem._clean_plate.shape[:2] == (FRAME_H * 2, FRAME_W * 2)
 
 
+def test_slow_slide_stays_temporal(tmp_path: Path) -> None:
+    """Regression for the live failure: a slowly-sliding badge over a static
+    background must keep using the clean plate (temporal), not age out into
+    inpaint. Previously stale=100%; now stale≈0 after the plate fills."""
+    rem = _remover(tmp_path, threshold=0.3)
+    clean = _textured_frame()
+    tpl = _make_watermark_template()
+
+    # Warm-up: roam widely so the y=60 band gets revealed into the plate.
+    span = FRAME_W - WM_W - 20
+    for i in range(60):
+        x = 20 + int((span / 2) * (1 - np.cos(i * 0.2)))
+        rem.process(_stamp(clean, tpl, x, 60))
+
+    # Now a slow continuous slide over the already-seen band.
+    out, x = None, 0
+    for i in range(8):
+        x = 60 + i * 4
+        out = rem.process(_stamp(clean, tpl, x, 60))
+
+    region = (slice(60, 60 + WM_H), slice(x, x + WM_W))
+    err = np.abs(out[region].astype(int) - clean[region].astype(int)).mean()
+    assert rem._last_fill == "temporal"  # real pixels, no inpaint
+    assert rem._last_stale_frac < 0.1
+    assert err < 4.0  # background restored, not a smear
+
+
+def test_track_and_hold_bridges_misses(tmp_path: Path, monkeypatch) -> None:
+    """A few no-match frames must NOT flash the badge back — the last
+    confident box is held for up to hold_frames."""
+    rem = _remover(tmp_path, threshold=0.3, hold_frames=4)
+    rem.process(_stamp(_textured_frame(), _make_watermark_template(), 300, 60))
+    assert rem._held_box is not None
+    held = rem._held_box
+
+    monkeypatch.setattr(rem, "_detect", lambda _g: (None, 0.0))  # force misses
+    clean = _textured_frame()
+    for _ in range(4):  # within the hold window → still coasting
+        rem.process(clean)
+        assert rem._held_box == held
+    rem.process(clean)  # one miss past hold_frames → give up
+    assert rem._held_box is None
+
+
+def test_capture_autotighten_shrinks_loose_box() -> None:
+    from swap_cli.display import _tighten_to_badge
+
+    canvas = np.full((140, 460, 3), 90, np.uint8)
+    badge = _make_watermark_template()  # WM_H x WM_W
+    canvas[50 : 50 + WM_H, 150 : 150 + WM_W] = badge
+    tight = _tighten_to_badge(canvas)
+    # Shrunk well below the loose canvas, roughly the badge size.
+    assert tight.shape[1] < canvas.shape[1] - 100
+    assert tight.shape[0] < canvas.shape[0] - 40
+    assert tight.shape[1] >= WM_W - 20  # still covers the strokes
+
+
 # --- resilience ------------------------------------------------------------
 
 def test_process_never_raises(tmp_path: Path, capsys) -> None:

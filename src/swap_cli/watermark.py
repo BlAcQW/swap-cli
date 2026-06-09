@@ -67,13 +67,23 @@ class WatermarkParams:
     # ~27ms/frame at 1280x720 — within the 20fps (50ms) budget.
     detect_scale: float = 0.6
     redetect_every: int = 1  # run detection every N frames
+    # Track-and-hold: the real badge's match confidence dips below the gate on
+    # ~1/3 of frames; without this the badge flashes back on every dip. On a
+    # miss we reuse the last confident box for up to hold_frames (the badge
+    # barely moves in that span) so removal stays steady.
+    hold_frames: int = 8
     # Temporal recovery: the badge roams, so a covered pixel was visible
     # recently. Fill the footprint from a "clean plate" of the most-recent
     # uncovered value (real pixels, no inpaint trace). A pixel stuck under
     # the badge longer than temporal_max_stale frames falls back to a tight
     # inpaint. Set temporal=False to use plain inpaint only.
     temporal: bool = True
-    temporal_max_stale: int = 12  # ~0.6s at 20fps
+    # How long a covered pixel keeps using its clean-plate value before the
+    # tight-inpaint fallback. The badge SLIDES, so a pixel is covered for tens
+    # of frames while the static background behind it stays valid — 90 frames
+    # (~4.5s) keeps slides trace-free; the fallback still catches a badge that
+    # truly parks on moving content.
+    temporal_max_stale: int = 90
     # Frame width the template was authored for. Decart's negotiated output
     # resolution varies (1088x624 and 1280x720 both seen), and matchTemplate
     # is NOT scale-invariant, so we resize the template by frame_width/ref to
@@ -135,6 +145,9 @@ class WatermarkRemover:
         self._tpl_cache: dict[int, np.ndarray] = {}
         self._last_conf = 0.0
         self._last_scale = 0.0
+        # Track-and-hold: last confident box + how many misses we've coasted.
+        self._held_box: Box | None = None
+        self._hold_count = 0
 
         # Temporal recovery state: a per-pixel "clean plate" (most-recent
         # uncovered value) and an age map (frames since last seen uncovered).
@@ -245,9 +258,20 @@ class WatermarkRemover:
                     self._locked_scale = None  # re-open the scale search
             else:
                 self._miss_streak = 0
-            self._log_detection(box)
+            # Track-and-hold: coast on the last confident box through brief
+            # confidence dips so the badge never flashes back. The badge slides
+            # slowly, so the held box still overlaps it for a few frames.
+            if box is not None:
+                self._held_box = box
+                self._hold_count = 0
+            elif self._held_box is not None and self._hold_count < self._params.hold_frames:
+                self._hold_count += 1
+            else:
+                self._held_box = None
+                self._hold_count = 0
+            self._log_detection(self._held_box)
 
-        box = self._last_box
+        box = self._held_box
         if box is None:
             return bgr  # watermark absent / not confident — pass through
 
@@ -284,9 +308,12 @@ class WatermarkRemover:
             fill = ""
             if self._params.temporal:
                 fill = f" fill={self._last_fill} stale={self._last_stale_frac * 100:.0f}%"
+            hold = ""
+            if self._hold_count:
+                hold = f" hold={self._hold_count}/{self._params.hold_frames}"
             print(
                 f"[watermark] match conf={self._last_conf:.2f} "
-                f"scale={self._last_scale:.2f} at ({x},{y}) {bw}x{bh}{fill}",
+                f"scale={self._last_scale:.2f} at ({x},{y}) {bw}x{bh}{fill}{hold}",
                 flush=True,
             )
         else:
