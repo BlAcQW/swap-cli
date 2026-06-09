@@ -66,6 +66,12 @@ class WatermarkParams:
     inpaint_method: Literal["telea", "ns"] = "telea"
     dilation: int = 8  # px to grow the footprint — generous so the badge can't
     # leak past it into the clean plate (which would reappear later)
+    # The match box hugs the bright text strokes, but the translucent pill
+    # extends beyond them — pad the removal footprint by this fraction of the
+    # box size so the whole pill is covered. Over-covering is free with
+    # temporal recovery (the extra ring is restored from real pixels), so we
+    # pad generously to guarantee the pill edges don't peek out.
+    footprint_pad_frac: float = 0.20
     feather: int = 3  # gaussian blur radius for the seam blend
     # Downscale for detection. 0.6 keeps enough edge detail for the
     # semi-transparent pill (0.5 lost too much and missed) while staying
@@ -107,7 +113,9 @@ _BRIGHTNESS_CUTOFF = 225  # white-text/pill detection for the threshold method
 # while the badge size is unknown. Brackets ±30% so a template authored at
 # one resolution still matches frames negotiated at another. Once a scale
 # clears the gate it is locked and the search collapses to that one scale.
-_SEARCH_MULTIPLIERS = (0.7, 0.85, 1.0, 1.15, 1.3)
+# Ordered base-first so that, with the strict `>` best-pick, near-ties favor
+# the expected size (1.0) over a far/wrong scale.
+_SEARCH_MULTIPLIERS = (1.0, 0.85, 1.15, 0.7, 1.3)
 _LOG_EVERY = 20  # throttle diagnostics to ~1/sec at 20fps
 _UNLOCK_AFTER_MISSES = 15  # re-open the scale search after this many misses
 
@@ -271,14 +279,16 @@ class WatermarkRemover:
                 self._miss_streak = 0
             else:
                 self._miss_streak += 1
-                if self._miss_streak >= _UNLOCK_AFTER_MISSES:
-                    self._locked_scale = None  # re-open the scale search
                 # Coast on the last box through brief dips (track-and-hold).
                 if self._held_box is not None and self._hold_count < self._params.hold_frames:
                     self._hold_count += 1
                 else:
+                    # Fully lost the badge: release, and only NOW re-open the
+                    # scale search. While tracking we keep the locked size
+                    # constant so the box can't drift to a wrong scale.
                     self._held_box = None
                     self._hold_count = 0
+                    self._locked_scale = None
             self._log_detection(self._held_box, accepted)
 
         box = self._held_box
@@ -379,9 +389,11 @@ class WatermarkRemover:
             return None, best_conf
 
         # Return the best candidate regardless of gate — _process applies the
-        # acquire/maintain hysteresis. Only lock the scale when reasonably
-        # confident, so we don't lock onto noise.
-        if best_conf >= self._params.maintain_threshold:
+        # acquire/maintain hysteresis. Lock the scale only on a CONFIDENT
+        # (acquire-level) match: the badge size is constant within a session,
+        # so a marginal match must never shrink/grow the locked box (that was
+        # the 0.70-scale drift that left part of the badge uncovered).
+        if best_conf >= self._params.threshold:
             self._locked_scale = best_cs
         self._last_scale = best_cs
         x = round(best_loc[0] / ds)
@@ -452,6 +464,20 @@ class WatermarkRemover:
 
     # ---- temporal recovery ----------------------------------------------------
 
+    def _padded_box(self, shape: tuple[int, int], box: Box) -> tuple[int, int, int, int]:
+        """Box grown by footprint_pad_frac (min dilation), clamped to frame —
+        covers the whole pill, not just the matched text strokes."""
+        h, w = shape
+        x, y, bw, bh = box
+        pad_x = max(self._params.dilation, round(self._params.footprint_pad_frac * bw))
+        pad_y = max(self._params.dilation, round(self._params.footprint_pad_frac * bh))
+        return (
+            max(0, x - pad_x),
+            max(0, y - pad_y),
+            min(w, x + bw + pad_x),
+            min(h, y + bh + pad_y),
+        )
+
     def _restore(self, bgr: np.ndarray, box: Box) -> np.ndarray:
         """Fill the badge footprint with real pixels from a per-pixel "clean
         plate" (the most-recent uncovered value), since the roaming badge
@@ -472,16 +498,13 @@ class WatermarkRemover:
             self._clean_plate = bgr.copy()
             self._age = np.full((h, w), max_stale + 1, dtype=np.int32)
 
-        # Footprint = the box (translucent pill + text), grown a little.
-        x, y, bw, bh = box
-        x0, y0 = max(0, x), max(0, y)
-        x1, y1 = min(w, x + bw), min(h, y + bh)
+        # Footprint = the box, padded generously so the translucent pill
+        # (which extends past the matched text strokes) is fully covered.
+        # Over-covering is free with temporal recovery.
+        x0, y0, x1, y1 = self._padded_box((h, w), box)
         footprint = np.zeros((h, w), dtype=np.uint8)
         if x1 > x0 and y1 > y0:
             footprint[y0:y1, x0:x1] = 255
-        if self._params.dilation > 0:
-            k = 2 * self._params.dilation + 1
-            footprint = cv2.dilate(footprint, np.ones((k, k), np.uint8))
 
         covered = footprint > 0
         # Refresh the plate everywhere the badge ISN'T (fast: copy the whole

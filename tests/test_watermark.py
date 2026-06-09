@@ -349,6 +349,50 @@ def test_footprint_covers_badge_with_margin(tmp_path: Path) -> None:
     assert mask[60 + WM_H + 6, 300 + WM_W // 2] > 0  # below the box
 
 
+def test_padded_box_extends_beyond_match(tmp_path: Path) -> None:
+    """The removal footprint must reach well past the matched box so the
+    translucent pill (wider than the text strokes) is fully covered."""
+    rem = _remover(tmp_path, footprint_pad_frac=0.14, dilation=8)
+    box = (300, 60, WM_W, WM_H)  # WM_W=120
+    x0, y0, x1, y1 = rem._padded_box((FRAME_H, FRAME_W), box)
+    pad_x = max(8, round(0.14 * WM_W))  # ~17px
+    assert x0 == 300 - pad_x and x1 == 300 + WM_W + pad_x
+    assert pad_x > 8  # proportional pad beat the flat dilation
+    assert y0 < 60 and y1 > 60 + WM_H
+
+
+def test_scale_locks_only_on_confident_match(tmp_path: Path) -> None:
+    """A marginal match must not change the locked scale (the 0.70 drift that
+    left the badge undersized); only a confident (>= acquire) match locks it."""
+    rem = _remover(tmp_path, threshold=0.5)
+    # Clean frame → best conf below the acquire gate → no scale lock.
+    rem._detect(cv2.cvtColor(_textured_frame(), cv2.COLOR_BGR2GRAY))
+    assert rem._locked_scale is None
+    # Badge frame → confident → scale locks.
+    frame = _stamp(_textured_frame(), _make_watermark_template(), 200, 60)
+    _box, conf = rem._detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    assert conf >= 0.5 and rem._locked_scale is not None
+
+
+def test_scale_persists_through_coast_resets_on_release(
+    tmp_path: Path, monkeypatch
+) -> None:
+    rem = _remover(tmp_path, threshold=0.5, maintain_threshold=0.38, hold_frames=3)
+    box = (300, 60, WM_W, WM_H)
+    monkeypatch.setattr(rem, "_detect", lambda _g: (box, 0.8))  # acquire
+    rem.process(_textured_frame())
+    rem._locked_scale = 1.0  # a locked size
+
+    monkeypatch.setattr(rem, "_detect", lambda _g: (box, 0.1))  # misses (coast)
+    for _ in range(3):  # within hold → scale must persist
+        rem.process(_textured_frame())
+        assert rem._held_box is not None
+        assert rem._locked_scale == 1.0
+    rem.process(_textured_frame())  # exceed hold → full release
+    assert rem._held_box is None
+    assert rem._locked_scale is None  # only now re-open the scale search
+
+
 def test_capture_autotighten_shrinks_loose_box() -> None:
     from swap_cli.display import _tighten_to_badge
 
