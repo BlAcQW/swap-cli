@@ -446,6 +446,23 @@ def test_local_search_ignores_far_distractor(tmp_path: Path) -> None:
     assert abs(cx - (badge[0] + 100)) < 80  # stayed on the badge, not 500px away
 
 
+def test_reacquires_jumped_badge_immediately(tmp_path: Path) -> None:
+    """The badge jumps far to a spot scoring between maintain and acquire, with
+    nothing at the old position → re-acquire it THIS frame (don't coast on the
+    stale box, which is what briefly showed the full pill)."""
+    rem = WatermarkRemover(
+        WatermarkParams(template_path=_text_template(tmp_path), template_ref_width=1088,
+                        detect_scale=0.6)
+    )
+    a = (200, 250)
+    rem._detect(_wide_scene(a, 0.7))  # acquire + lock at A
+    rem._last_center = (a[0] + 100, a[1] + 26)
+    # Badge now ONLY at a far B, faint (global conf in (0.28, 0.50)); A is empty.
+    box, conf = rem._detect(_wide_scene((820, 470), 0.25))
+    assert 0.28 <= conf < 0.5  # the moderate-confidence window that used to coast
+    assert abs((box[0] + box[2] // 2) - (820 + 100)) < 90  # followed to B, not stale A
+
+
 def test_confident_far_match_reacquires(tmp_path: Path) -> None:
     rem = WatermarkRemover(
         WatermarkParams(template_path=_text_template(tmp_path), template_ref_width=1088,

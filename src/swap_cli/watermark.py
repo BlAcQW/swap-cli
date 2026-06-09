@@ -413,12 +413,22 @@ class WatermarkRemover:
                 if ll is not None and lc > local_conf:
                     local_conf, local_loc, local_cs = lc, ll, cs
 
-        # Prefer the local (near-the-badge) peak while tracking, unless the
-        # global peak is CONFIDENT and elsewhere (a genuine fast move / re-acquire).
+        # While tracking, prefer the local (near-the-badge) peak ONLY when it's
+        # a real match — that avoids a far background look-alike. But when the
+        # local window is empty (the badge JUMPED away), fall back to the global
+        # peak so we re-acquire it THIS frame instead of coasting at the stale
+        # spot (which is what briefly showed the full pill).
         if tracking and local_loc is not None:
-            global_far = best_loc != local_loc
-            if not (best_conf >= self._params.threshold and global_far):
+            far = best_loc != local_loc
+            # A confident, clearly-stronger far peak = a genuine fast move → take it.
+            strong_global = (
+                far
+                and best_conf >= self._params.threshold
+                and best_conf > local_conf + 0.10
+            )
+            if local_conf >= self._params.maintain_threshold and not strong_global:
                 best_conf, best_loc, best_cs = local_conf, local_loc, local_cs
+            # else: keep the global peak (re-acquire the jumped badge).
 
         if best_loc is None:
             return None, best_conf
