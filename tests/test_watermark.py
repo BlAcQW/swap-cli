@@ -476,9 +476,10 @@ def test_confident_far_match_reacquires(tmp_path: Path) -> None:
     assert abs((box[0] + box[2] // 2) - (760 + 100)) < 80
 
 
-def test_motion_aware_inpaints_when_scene_moves(tmp_path: Path) -> None:
+def test_motion_aware_unblends_when_scene_moves(tmp_path: Path) -> None:
     """Over a moving region the fill must switch from the (stale) clean plate to
-    inpaint, so we don't show a ghost."""
+    alpha-unblend (recover the real background from the current frame), so we
+    show neither a ghost nor a streaky inpaint patch."""
     rem = _remover(tmp_path, threshold=0.3)
     badge = (300, 60, WM_W, WM_H)
 
@@ -490,7 +491,55 @@ def test_motion_aware_inpaints_when_scene_moves(tmp_path: Path) -> None:
     moved = _textured_frame()
     cv2.rectangle(moved, (340, 40), (520, 140), (240, 230, 220), -1)  # big change nearby
     rem._restore(moved, badge)
-    assert rem._last_fill == "inpaint(motion)"
+    assert rem._last_fill == "unblend(motion)"
+
+
+def test_unblend_beats_inpaint_over_texture(tmp_path: Path) -> None:
+    """Over a moving subject, alpha-unblend recovers the real background from the
+    current frame far more faithfully than inpaint, which can't reconstruct fine
+    texture and leaves a streaky patch (the user's "scratches")."""
+    rem = _remover(tmp_path, threshold=0.3)
+    bx, by = 260, 150
+    badge = (bx, by, WM_W, WM_H)
+    reg = (slice(by, by + WM_H), slice(bx, bx + WM_W))
+
+    # Fine texture as DARK thin lines on a bright base, so the white top-hat
+    # (which isolates the opaque text) does NOT mistake the texture for text.
+    real = np.full((FRAME_H, FRAME_W, 3), 185, dtype=np.uint8)
+    for x in range(0, FRAME_W, 10):
+        cv2.line(real, (x, 0), (x, FRAME_H), (95, 100, 105), 2)
+    for y in range(0, FRAME_H, 14):
+        cv2.line(real, (0, y), (FRAME_W, y), (105, 95, 110), 2)
+
+    # Semi-transparent pill (darkens) + opaque bright text, over the badge box.
+    a, tint = 0.4, 25.0
+    seen = real.astype(np.float32)
+    seen[reg] = seen[reg] * (1 - a) + tint * a
+    seen = np.clip(seen, 0, 255).astype(np.uint8)
+    cv2.putText(seen, "AI", (bx + 12, by + WM_H - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (245, 245, 245), 2, cv2.LINE_AA)
+
+    # Force the moving branch: prime _prev_bgr with very different surroundings.
+    rem._restore(np.full_like(seen, 30), badge)
+    out = rem._restore(seen, badge)
+    assert rem._last_fill == "unblend(motion)"
+
+    unblend_err = float(np.abs(out[reg].astype(int) - real[reg].astype(int)).mean())
+    mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    mask[reg] = 255
+    inpaint = cv2.inpaint(seen, mask, 3, cv2.INPAINT_TELEA)
+    inpaint_err = float(np.abs(inpaint[reg].astype(int) - real[reg].astype(int)).mean())
+
+    assert unblend_err < inpaint_err * 0.7  # materially closer to the real background
+
+
+def test_unblend_falls_back_when_no_ring(tmp_path: Path) -> None:
+    """With no usable surrounding reference, _unblend returns None (so _restore
+    falls back to inpaint) instead of crashing or dividing by an empty stat."""
+    rem = _remover(tmp_path)
+    sub = np.full((20, 40, 3), 120, dtype=np.uint8)
+    cov = np.ones((20, 40), dtype=bool)  # everything covered → no ring
+    assert rem._unblend(sub, cov, cov.copy()) is None
 
 
 def test_scale_locks_only_on_confident_match(tmp_path: Path) -> None:

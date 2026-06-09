@@ -108,6 +108,13 @@ class WatermarkParams:
     # Over a static background we keep using the (trace-free) clean plate.
     motion_aware: bool = True
     motion_thresh: float = 7.0  # mean abs diff (0–255) in the footprint's ring
+    # When the badge is over a moving subject, recover the real background from
+    # the CURRENT frame by inverting the pill's semi-transparent darkening
+    # (alpha-unblend) instead of inpainting a guess. The pill is see-through, so
+    # the background is still present under it — unblending keeps it aligned with
+    # the live scene (no streaky patch). Only the opaque text strokes still need
+    # a tiny inpaint. Falls back to inpaint when the estimate is unreliable.
+    unblend: bool = True
     # How long a covered pixel keeps using its clean-plate value before the
     # tight-inpaint fallback. The badge SLIDES, so a pixel is covered for tens
     # of frames while the static background behind it stays valid — 90 frames
@@ -571,6 +578,55 @@ class WatermarkRemover:
         diff = np.abs(bgr_sub[ring].astype(np.int16) - prev_sub[ring].astype(np.int16))
         return float(diff.mean()) > self._params.motion_thresh
 
+    def _opaque_mask(self, bgr_sub: np.ndarray, cov_sub: np.ndarray) -> np.ndarray:
+        """Mask of the badge's OPAQUE bright text within the covered footprint,
+        via Otsu on grayscale restricted to the covered pixels. Unlike the
+        top-hat (`_badge_shape`), this does not light up fine bright background
+        texture, so the semi-transparent pill area is left intact for
+        unblending. Returns an all-False mask when no bright cluster clearly
+        separates (i.e. the pill body alone — nothing opaque to inpaint)."""
+        if not cov_sub.any():
+            return np.zeros(cov_sub.shape, dtype=bool)
+        gray = cv2.cvtColor(bgr_sub, cv2.COLOR_BGR2GRAY)
+        vals = gray[cov_sub].reshape(-1, 1)
+        thr, _ = cv2.threshold(vals, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        text = cov_sub & (gray > thr)
+        if float(text.sum()) > 0.5 * float(cov_sub.sum()):
+            return np.zeros(cov_sub.shape, dtype=bool)  # no clear opaque text
+        return text
+
+    def _unblend(
+        self, bgr_sub: np.ndarray, cov_sub: np.ndarray, pill: np.ndarray
+    ) -> np.ndarray | None:
+        """Recover the real background under the semi-transparent pill from the
+        CURRENT frame by inverting `seen = (1-a)*real + a*tint`.
+
+        The background is still present under the see-through pill (just
+        darkened), so this keeps it aligned with the live scene — no streaky
+        inpaint patch. The pill's darkening (a, tint) is estimated per channel,
+        with no hardcoded values: the uncovered surroundings give the un-tinted
+        background stats (mean, variance); the pill area gives the tinted stats.
+        Since the same texture is scaled by (1-a), `1-a = sqrt(var_in/var_ring)`
+        and `tint = (mean_in - (1-a)*mean_ring)/a`. Returns None (caller falls
+        back to inpaint) when there aren't enough reference pixels.
+        """
+        ring = ~cov_sub  # uncovered surroundings = un-tinted background reference
+        if int(ring.sum()) < 50 or int(pill.sum()) < 25:
+            return None
+        ring_px = bgr_sub[ring].astype(np.float32)
+        pill_px = bgr_sub[pill].astype(np.float32)
+        out = bgr_sub.astype(np.float32).copy()
+        for c in range(bgr_sub.shape[2]):
+            var_ring = float(ring_px[:, c].var())
+            if var_ring < 1.0:  # flat reference → can't estimate the scale
+                return None
+            var_in = float(pill_px[:, c].var())
+            one_minus_a = float(np.clip(np.sqrt(var_in / var_ring), 0.3, 0.98))
+            a = 1.0 - one_minus_a
+            tint = (float(pill_px[:, c].mean()) - one_minus_a * float(ring_px[:, c].mean())) / a
+            out[:, :, c] = (bgr_sub[:, :, c].astype(np.float32) - a * tint) / one_minus_a
+        return np.clip(out, 0, 255).astype(np.uint8)
+
     def _restore(self, bgr: np.ndarray, box: Box) -> np.ndarray:
         """Fill the badge footprint with real pixels from a per-pixel "clean
         plate" (the most-recent uncovered value), since the roaming badge
@@ -632,12 +688,34 @@ class WatermarkRemover:
 
         filled = bgr_sub.copy()
         if moving:
-            # Over a moving subject: inpaint the whole footprint from the
-            # current surroundings (a neutral patch, not a stale face-ghost).
-            inpaint_mask = (cov_sub.astype(np.uint8)) * 255
-            patched = cv2.inpaint(filled, inpaint_mask, self._params.inpaint_radius, flag)
-            filled[cov_sub] = patched[cov_sub]
-            self._last_fill = "inpaint(motion)"
+            # Over a moving subject the clean plate is stale (would ghost) and a
+            # full inpaint can't reconstruct fine texture (leaves a streaky
+            # patch). The pill is SEE-THROUGH, so recover the real background
+            # from the current frame by inverting its darkening (alpha-unblend);
+            # only the opaque text strokes still need a tiny inpaint.
+            text = self._opaque_mask(bgr_sub, cov_sub)
+            pill = cov_sub & ~text
+            unblended = self._unblend(bgr_sub, cov_sub, pill) if self._params.unblend else None
+            if unblended is not None:
+                filled[pill] = unblended[pill]
+                # Inpaint only the thin opaque text strokes (small area).
+                text_mask = ((cov_sub & text).astype(np.uint8)) * 255
+                if int(cv2.countNonZero(text_mask)) > 0:
+                    patched = cv2.inpaint(
+                        filled, text_mask, self._params.inpaint_radius, flag
+                    )
+                    sel = text_mask > 0
+                    filled[sel] = patched[sel]
+                self._last_fill = "unblend(motion)"
+            else:
+                # Fallback (unblend off, or estimate unreliable): inpaint the
+                # whole footprint from the current surroundings.
+                inpaint_mask = (cov_sub.astype(np.uint8)) * 255
+                patched = cv2.inpaint(
+                    filled, inpaint_mask, self._params.inpaint_radius, flag
+                )
+                filled[cov_sub] = patched[cov_sub]
+                self._last_fill = "inpaint(motion)"
             self._last_stale_frac = 1.0
         else:
             fresh_sub = cov_sub & (age_sub <= max_stale)
