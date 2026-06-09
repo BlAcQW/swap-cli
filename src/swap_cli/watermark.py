@@ -52,7 +52,11 @@ class WatermarkParams:
     # Confidence gate (0..1). 0.50 biases toward removing the badge: a miss
     # leaves the watermark visible (bad), a rare false positive is a small
     # upper-frame smudge (minor). Tuned against the bundled template.
-    threshold: float = 0.50
+    threshold: float = 0.50  # ACQUIRE gate: confidence to first lock onto the badge
+    # MAINTAIN gate: once locked, keep tracking through dips at this lower bar.
+    # The badge is always present and roams smoothly, so sustained tracking is
+    # safe and avoids the flicker a flat low gate or a high flat gate cause.
+    maintain_threshold: float = 0.38
     # Isolate the bright text via white top-hat before matchTemplate, making
     # the match background-invariant for the semi-transparent badge.
     text_isolate: bool = True
@@ -60,7 +64,8 @@ class WatermarkParams:
     roi: tuple[float, float, float, float] | None = None  # fractional x,y,w,h
     inpaint_radius: int = 3
     inpaint_method: Literal["telea", "ns"] = "telea"
-    dilation: int = 3  # px to grow the footprint (badge edge / anti-alias)
+    dilation: int = 8  # px to grow the footprint — generous so the badge can't
+    # leak past it into the clean plate (which would reappear later)
     feather: int = 3  # gaussian blur radius for the seam blend
     # Downscale for detection. 0.6 keeps enough edge detail for the
     # semi-transparent pill (0.5 lost too much and missed) while staying
@@ -71,7 +76,7 @@ class WatermarkParams:
     # ~1/3 of frames; without this the badge flashes back on every dip. On a
     # miss we reuse the last confident box for up to hold_frames (the badge
     # barely moves in that span) so removal stays steady.
-    hold_frames: int = 8
+    hold_frames: int = 15
     # Temporal recovery: the badge roams, so a covered pixel was visible
     # recently. Fill the footprint from a "clean plate" of the most-recent
     # uncovered value (real pixels, no inpaint trace). A pixel stuck under
@@ -148,6 +153,7 @@ class WatermarkRemover:
         # Track-and-hold: last confident box + how many misses we've coasted.
         self._held_box: Box | None = None
         self._hold_count = 0
+        self._gate_mode = "acquire"  # "acquire" | "maintain" (hysteresis)
 
         # Temporal recovery state: a per-pixel "clean plate" (most-recent
         # uncovered value) and an age map (frames since last seen uncovered).
@@ -244,32 +250,36 @@ class WatermarkRemover:
         if self._frame_idx == 1:
             self._log_active(bgr.shape[:2])
 
-        redetect = self._last_box is None or (
+        redetect = self._held_box is None or (
             self._frame_idx % max(1, self._params.redetect_every) == 0
         )
         if redetect:
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
             box, conf = self._detect(gray)
-            self._last_box = box
             self._last_conf = conf
-            if box is None:
+            # Hysteresis: high bar to ACQUIRE the badge from cold, low bar to
+            # MAINTAIN the lock once we have it (the badge is ever-present and
+            # roams smoothly, so coasting at a lower gate is safe and steady).
+            tracking = self._held_box is not None
+            gate = self._params.maintain_threshold if tracking else self._params.threshold
+            self._gate_mode = "maintain" if tracking else "acquire"
+            accepted = box is not None and conf >= gate
+            if accepted:
+                self._last_box = box
+                self._held_box = box
+                self._hold_count = 0
+                self._miss_streak = 0
+            else:
                 self._miss_streak += 1
                 if self._miss_streak >= _UNLOCK_AFTER_MISSES:
                     self._locked_scale = None  # re-open the scale search
-            else:
-                self._miss_streak = 0
-            # Track-and-hold: coast on the last confident box through brief
-            # confidence dips so the badge never flashes back. The badge slides
-            # slowly, so the held box still overlaps it for a few frames.
-            if box is not None:
-                self._held_box = box
-                self._hold_count = 0
-            elif self._held_box is not None and self._hold_count < self._params.hold_frames:
-                self._hold_count += 1
-            else:
-                self._held_box = None
-                self._hold_count = 0
-            self._log_detection(self._held_box)
+                # Coast on the last box through brief dips (track-and-hold).
+                if self._held_box is not None and self._hold_count < self._params.hold_frames:
+                    self._hold_count += 1
+                else:
+                    self._held_box = None
+                    self._hold_count = 0
+            self._log_detection(self._held_box, accepted)
 
         box = self._held_box
         if box is None:
@@ -299,7 +309,7 @@ class WatermarkRemover:
             flush=True,
         )
 
-    def _log_detection(self, box: Box | None) -> None:
+    def _log_detection(self, box: Box | None, accepted: bool = True) -> None:
         # Throttle to ~1/sec so we don't flood stdout at 20fps.
         if self._frame_idx % _LOG_EVERY != 0:
             return
@@ -311,8 +321,9 @@ class WatermarkRemover:
             hold = ""
             if self._hold_count:
                 hold = f" hold={self._hold_count}/{self._params.hold_frames}"
+            mode = "" if accepted else " [coasting]"
             print(
-                f"[watermark] match conf={self._last_conf:.2f} "
+                f"[watermark] match conf={self._last_conf:.2f} ({self._gate_mode}{mode}) "
                 f"scale={self._last_scale:.2f} at ({x},{y}) {bw}x{bh}{fill}{hold}",
                 flush=True,
             )
@@ -364,11 +375,14 @@ class WatermarkRemover:
             if mx > best_conf:
                 best_conf, best_loc, best_cs = float(mx), ml, cs
 
-        if best_loc is None or best_conf < self._params.threshold:
+        if best_loc is None:
             return None, best_conf
 
-        # Lock the winning scale so steady state searches just one.
-        self._locked_scale = best_cs
+        # Return the best candidate regardless of gate — _process applies the
+        # acquire/maintain hysteresis. Only lock the scale when reasonably
+        # confident, so we don't lock onto noise.
+        if best_conf >= self._params.maintain_threshold:
+            self._locked_scale = best_cs
         self._last_scale = best_cs
         x = round(best_loc[0] / ds)
         y = round(best_loc[1] / ds)
@@ -406,9 +420,7 @@ class WatermarkRemover:
         box_area = max(1, bw * bh)
         bright = int(cv2.countNonZero(mask[by : by + bh, bx : bx + bw]))
         confidence = bright / box_area
-        if confidence < self._params.threshold:
-            return None, confidence
-        # Offset back into full-frame coordinates.
+        # Return the best candidate; _process applies the acquire/maintain gate.
         return (bx + rx, by + ry, bw, bh), confidence
 
     # ---- mask + inpaint -------------------------------------------------------

@@ -311,6 +311,44 @@ def test_track_and_hold_bridges_misses(tmp_path: Path, monkeypatch) -> None:
     assert rem._held_box is None
 
 
+def test_hysteresis_maintains_through_dip(tmp_path: Path, monkeypatch) -> None:
+    """Once acquired, a confidence dip between maintain and acquire keeps the
+    lock (no flicker). This is the fix for 'covers some, doesn't cover some'."""
+    rem = _remover(tmp_path, threshold=0.5, maintain_threshold=0.38)
+    box = (300, 60, WM_W, WM_H)
+
+    monkeypatch.setattr(rem, "_detect", lambda _g: (box, 0.80))  # strong → acquire
+    rem.process(_textured_frame())
+    assert rem._held_box == box
+    assert rem._gate_mode == "acquire"
+
+    # Dip to 0.45 (below acquire 0.50, above maintain 0.38) → still tracked.
+    monkeypatch.setattr(rem, "_detect", lambda _g: (box, 0.45))
+    rem.process(_textured_frame())
+    assert rem._held_box == box
+    assert rem._gate_mode == "maintain"
+
+
+def test_no_false_acquire_when_cold(tmp_path: Path, monkeypatch) -> None:
+    """A 0.45 candidate from cold must NOT acquire (below the acquire gate),
+    so spurious low matches can't start a false lock."""
+    rem = _remover(tmp_path, threshold=0.5, maintain_threshold=0.38)
+    box = (300, 60, WM_W, WM_H)
+    monkeypatch.setattr(rem, "_detect", lambda _g: (box, 0.45))
+    frame = _textured_frame()
+    out = rem.process(frame)
+    assert rem._held_box is None
+    assert np.array_equal(out, frame)  # nothing removed
+
+
+def test_footprint_covers_badge_with_margin(tmp_path: Path) -> None:
+    rem = _remover(tmp_path, dilation=8)
+    mask = rem._build_mask((FRAME_H, FRAME_W), (300, 60, WM_W, WM_H))
+    # Dilation 8 covers several px outside the raw box on every side.
+    assert mask[60, 300 - 6] > 0  # left of the box
+    assert mask[60 + WM_H + 6, 300 + WM_W // 2] > 0  # below the box
+
+
 def test_capture_autotighten_shrinks_loose_box() -> None:
     from swap_cli.display import _tighten_to_badge
 
