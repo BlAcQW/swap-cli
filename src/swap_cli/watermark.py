@@ -72,8 +72,10 @@ class WatermarkParams:
     # extends beyond them — pad the removal footprint by this fraction of the
     # box size so the whole pill is covered. Over-covering is free with
     # temporal recovery (the extra ring is restored from real pixels), so we
-    # pad generously to guarantee the pill edges don't peek out.
-    footprint_pad_frac: float = 0.20
+    # pad generously to absorb low-confidence location error/jitter — the pill
+    # edge must stay inside the SOLID footprint, not in the feathered seam, or
+    # a faint sliver peeks out (and leaks into the clean plate).
+    footprint_pad_frac: float = 0.30
     feather: int = 3  # gaussian blur radius for the seam blend
     # Downscale for detection. 0.6 keeps enough edge detail for the
     # semi-transparent pill (0.5 lost too much and missed) while staying

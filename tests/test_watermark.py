@@ -382,6 +382,23 @@ def test_padded_box_extends_beyond_match(tmp_path: Path) -> None:
     assert y0 < 60 and y1 > 60 + WM_H
 
 
+def test_footprint_absorbs_location_error(tmp_path: Path) -> None:
+    """At low confidence the match lands a few px off; the padded footprint
+    (0.30) must still cover the whole pill so no edge peeks out / leaks."""
+    rem = _remover(tmp_path, footprint_pad_frac=0.30, dilation=8)
+    box_w, box_h = 200, 57
+    # Matched box (tight, on the text strokes).
+    bx, by = 400, 200
+    x0, y0, x1, y1 = rem._padded_box((FRAME_H, FRAME_W), (bx, by, box_w, box_h))
+    # The real pill is wider than the strokes AND the match is offset ~30px.
+    pill_overhang, offset = 16, 30
+    pill_x0 = bx - pill_overhang - offset
+    pill_x1 = bx + box_w + pill_overhang - offset
+    # Footprint must fully contain the offset, oversized pill.
+    assert x0 <= pill_x0 and x1 >= pill_x1
+    assert y0 < by and y1 > by + box_h
+
+
 def test_scale_locks_only_on_confident_match(tmp_path: Path) -> None:
     """A marginal match must not change the locked scale (the 0.70 drift that
     left the badge undersized); only a confident (>= acquire) match locks it."""
