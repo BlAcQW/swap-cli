@@ -75,8 +75,13 @@ class WatermarkParams:
     # pad generously to absorb low-confidence location error/jitter — the pill
     # edge must stay inside the SOLID footprint, not in the feathered seam, or
     # a faint sliver peeks out (and leaks into the clean plate).
-    footprint_pad_frac: float = 0.30
-    feather: int = 3  # gaussian blur radius for the seam blend
+    # Tightened from 0.30: a big pad replaced a wide ring of clean background
+    # with slightly-stale plate pixels that, under camera jitter, misalign with
+    # the live frame and show as faint "scratches". 0.20 still covers the pill
+    # (Sprint 21 tracks/re-acquires reliably) while pasting far less background.
+    footprint_pad_frac: float = 0.20
+    feather: int = 5  # gaussian blur radius for the seam blend (softer = the
+    # boundary blends more, less visible as a scratchy outline)
     # Downscale for detection. 0.6 keeps enough edge detail for the
     # semi-transparent pill (0.5 lost too much and missed) while staying
     # ~27ms/frame at 1280x720 — within the 20fps (50ms) budget.
