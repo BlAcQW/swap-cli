@@ -36,6 +36,12 @@ if TYPE_CHECKING:
 Box = tuple[int, int, int, int]
 
 DetectionMethod = Literal["template", "threshold"]
+# How a located badge is hidden: "reconstruct" rebuilds the real background
+# behind it (temporal clean-plate + inpaint — invisible, best quality), "blur"
+# just smears the badge into an unreadable soft patch (always works, no
+# reconstruction artifacts, but leaves a visible soft blob). Detection is
+# orthogonal — both removals still need `method` to find the badge.
+RemovalMode = Literal["reconstruct", "blur"]
 
 
 @dataclass(frozen=True)
@@ -115,6 +121,13 @@ class WatermarkParams:
     # center the multi-scale search on the real badge size. The bundled
     # default was cropped from a 1280-wide frame.
     template_ref_width: int = 1280
+    # Removal/fill strategy (see RemovalMode). "reconstruct" is the default,
+    # high-quality background rebuild; "blur" smears the badge instead.
+    removal: RemovalMode = "reconstruct"
+    # Blur strength for removal="blur": the Gaussian kernel is this fraction of
+    # the footprint's shorter side (clamped to an odd int >= 9). 0.35 reliably
+    # makes the badge text unreadable without smearing far beyond it.
+    blur_strength: float = 0.35
 
 
 # Threshold-method default region when no ROI is configured: the upper
@@ -313,6 +326,8 @@ class WatermarkRemover:
         if box is None:
             return bgr  # watermark absent / not confident — pass through
 
+        if self._params.removal == "blur":
+            return self._blur_region(bgr, box)
         if self._params.temporal:
             return self._restore(bgr, box)
         # Plain-inpaint path (temporal disabled).
@@ -546,6 +561,45 @@ class WatermarkRemover:
             min(w, x + bw + pad_x),
             min(h, y + bh + pad_y),
         )
+
+    def _blur_region(self, bgr: np.ndarray, box: Box) -> np.ndarray:
+        """Hide the badge by Gaussian-blurring its footprint into an unreadable
+        soft patch (removal="blur").
+
+        Unlike reconstruction this doesn't try to rebuild the background — it
+        just smears the badge, so it always works (no template-reconstruction
+        artifacts) at the cost of a visible soft blob. The blur kernel scales
+        with the footprint so the text becomes illegible, and the same feathered
+        seam as `_restore` blends the patch edge."""
+        h, w = bgr.shape[:2]
+        x0, y0, x1, y1 = self._padded_box((h, w), box)
+        self._last_fill = "blur"
+        self._last_stale_frac = 0.0
+        if x1 <= x0 or y1 <= y0:
+            return bgr
+
+        sub = (slice(y0, y1), slice(x0, x1))
+        bgr_sub = bgr[sub]
+        short_side = min(y1 - y0, x1 - x0)
+        ksize = max(9, round(self._params.blur_strength * short_side))
+        if ksize % 2 == 0:
+            ksize += 1
+        blurred = cv2.GaussianBlur(bgr_sub, (ksize, ksize), 0)
+
+        footprint = np.zeros((h, w), dtype=np.uint8)
+        footprint[y0:y1, x0:x1] = 255
+        fp_sub = footprint[sub]
+        if self._params.feather > 0:
+            k = 2 * self._params.feather + 1
+            alpha = cv2.GaussianBlur(fp_sub, (k, k), 0).astype(np.float32) / 255.0
+        else:
+            alpha = (fp_sub > 0).astype(np.float32)
+        alpha = alpha[:, :, None]
+        blended = bgr_sub.astype(np.float32) * (1.0 - alpha) + blurred.astype(np.float32) * alpha
+
+        out = bgr.copy()
+        out[sub] = blended.astype(np.uint8)
+        return out
 
     def _scene_moving(
         self, bgr_sub: np.ndarray, cov_sub: np.ndarray, sub: tuple

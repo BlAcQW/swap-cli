@@ -213,6 +213,17 @@ def run(
             help="Path to the watermark template PNG (overrides saved config).",
         ),
     ] = None,
+    watermark_removal: Annotated[
+        str | None,
+        typer.Option(
+            "--watermark-removal",
+            help=(
+                "How to hide the badge: 'reconstruct' (rebuild the background, "
+                "invisible) or 'blur' (smear it into a soft patch — always works). "
+                "Omit to use your saved preference."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Open a realtime Decart session and stream until you press Q."""
     cfg = config.load()
@@ -247,6 +258,7 @@ def run(
     wm_template = (
         str(watermark_template) if watermark_template else cfg.watermark_template
     )
+    wm_removal = watermark_removal if watermark_removal is not None else cfg.watermark_removal
 
     opts = RunOptions(
         decart_api_key=cfg.decart_api_key,
@@ -259,6 +271,7 @@ def run(
         remove_watermark=wm_enabled,
         watermark_template=wm_template,
         watermark_method=cfg.watermark_method,
+        watermark_removal=wm_removal,
         watermark_threshold=cfg.watermark_threshold,
         watermark_inpaint_radius=cfg.watermark_inpaint_radius,
         watermark_template_width=cfg.watermark_template_width,

@@ -45,6 +45,9 @@ class Config:
     remove_watermark: bool = False
     watermark_template: str | None = None  # path to captured watermark PNG
     watermark_method: str = "template"  # "template" | "threshold"
+    # How a located badge is hidden: "reconstruct" (invisible rebuild) or
+    # "blur" (smear into an unreadable soft patch). Detection is separate.
+    watermark_removal: str = "reconstruct"  # "reconstruct" | "blur"
     watermark_threshold: float = 0.50  # matchTemplate confidence gate (0..1)
     watermark_inpaint_radius: int = 3
     # Frame width the captured template was grabbed at. Decart's output
@@ -85,6 +88,7 @@ def load() -> Config:
         remove_watermark=bool(data.get("remove_watermark", False)),
         watermark_template=_clean(data.get("watermark_template")),
         watermark_method=_clean(data.get("watermark_method")) or "template",
+        watermark_removal=_clean(data.get("watermark_removal")) or "reconstruct",
         watermark_threshold=_float_or_none(data.get("watermark_threshold")) or 0.50,
         watermark_inpaint_radius=_int_or_none(data.get("watermark_inpaint_radius")) or 3,
         watermark_template_width=_int_or_none(data.get("watermark_template_width")),
@@ -123,6 +127,8 @@ def save(cfg: Config) -> Path:
         body.append(f'watermark_template = "{_escape(cfg.watermark_template)}"')
     if cfg.watermark_method and cfg.watermark_method != "template":
         body.append(f'watermark_method = "{_escape(cfg.watermark_method)}"')
+    if cfg.watermark_removal and cfg.watermark_removal != "reconstruct":
+        body.append(f'watermark_removal = "{_escape(cfg.watermark_removal)}"')
     if cfg.watermark_threshold != 0.50:
         body.append(f"watermark_threshold = {cfg.watermark_threshold}")
     if cfg.watermark_inpaint_radius != 3:
@@ -158,6 +164,7 @@ def update(**kwargs: Any) -> Config:
         remove_watermark=kwargs.get("remove_watermark", current.remove_watermark),
         watermark_template=kwargs.get("watermark_template", current.watermark_template),
         watermark_method=kwargs.get("watermark_method", current.watermark_method),
+        watermark_removal=kwargs.get("watermark_removal", current.watermark_removal),
         watermark_threshold=kwargs.get("watermark_threshold", current.watermark_threshold),
         watermark_inpaint_radius=kwargs.get(
             "watermark_inpaint_radius", current.watermark_inpaint_radius

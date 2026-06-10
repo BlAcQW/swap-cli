@@ -219,6 +219,36 @@ class SwapGUI(ctk.CTk):
             variable=self._watermark_var,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
 
+        # Removal style (only used when "Remove watermark" is on). Reconstruct
+        # rebuilds the real background behind the roaming badge (invisible, best
+        # quality); Blur just smears the badge into an unreadable soft patch
+        # (always works, no reconstruction artifacts, but a visible soft blob).
+        # Seeded from the saved preference; read at start-time like the toggle.
+        _wm_cfg = config.load()
+        removal_row = ctk.CTkFrame(opts, fg_color="transparent")
+        removal_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4))
+        ctk.CTkLabel(
+            removal_row, text="Removal style", anchor="w", font=ctk.CTkFont(size=11)
+        ).pack(anchor="w")
+        self._watermark_removal_var = tk.StringVar(
+            value=(_wm_cfg.watermark_removal or "reconstruct").capitalize()
+        )
+        ctk.CTkSegmentedButton(
+            removal_row,
+            values=["Reconstruct", "Blur"],
+            variable=self._watermark_removal_var,
+        ).pack(anchor="w", fill="x", pady=(2, 0))
+        ctk.CTkLabel(
+            removal_row,
+            text="Reconstruct: invisible, best quality. "
+            "Blur: smears the badge — always works, leaves a soft patch.",
+            anchor="w",
+            font=ctk.CTkFont(size=10),
+            text_color="#6b7280",
+            wraplength=460,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+
         # Model selector. Decart fixes width/height/fps per model — we display
         # the native dimensions next to each option so the user knows what
         # they're getting. There is no orientation knob: the SDK only accepts
@@ -660,6 +690,11 @@ class SwapGUI(ctk.CTk):
             ),
             watermark_template=cfg.watermark_template,
             watermark_method=cfg.watermark_method,
+            watermark_removal=(
+                self._watermark_removal_var.get().lower()
+                if hasattr(self, "_watermark_removal_var")
+                else cfg.watermark_removal
+            ),
             watermark_threshold=cfg.watermark_threshold,
             watermark_inpaint_radius=cfg.watermark_inpaint_radius,
             watermark_template_width=cfg.watermark_template_width,
@@ -673,6 +708,11 @@ class SwapGUI(ctk.CTk):
             wm_on = bool(self._watermark_var.get())
             if wm_on != cfg.remove_watermark:
                 config.update(remove_watermark=wm_on)
+        # Persist the removal style too.
+        if hasattr(self, "_watermark_removal_var"):
+            wm_removal = self._watermark_removal_var.get().lower()
+            if wm_removal != cfg.watermark_removal:
+                config.update(watermark_removal=wm_removal)
 
         self._stop_event = asyncio.Event()
         self._set_running(True)

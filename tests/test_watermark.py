@@ -493,6 +493,41 @@ def test_motion_aware_inpaints_when_scene_moves(tmp_path: Path) -> None:
     assert rem._last_fill == "inpaint(motion)"
 
 
+def test_blur_removal_smears_badge(tmp_path: Path) -> None:
+    """removal='blur' replaces the badge footprint with a blurred patch — the
+    region's high-frequency detail (Laplacian variance) drops sharply and the
+    output differs from the input there."""
+    rem = _remover(tmp_path, threshold=0.3, removal="blur")
+    bx, by = 300, 60
+    badge = (bx, by, WM_W, WM_H)
+    # Sharp, high-detail content under the badge so blur has something to smear.
+    frame = _textured_frame()
+    cv2.putText(frame, "AI GENERATED", (bx + 4, by + 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
+    out = rem._blur_region(frame, badge)
+    assert rem._last_fill == "blur"
+
+    reg = (slice(by, by + WM_H), slice(bx, bx + WM_W))
+
+    def detail(img: np.ndarray) -> float:
+        g = cv2.cvtColor(img[reg], cv2.COLOR_BGR2GRAY)
+        return float(cv2.Laplacian(g, cv2.CV_64F).var())
+
+    assert detail(out) < detail(frame) * 0.5  # markedly blurrier
+    # The footprint actually changed (not a pass-through).
+    assert int(np.abs(out[reg].astype(int) - frame[reg].astype(int)).sum()) > 0
+
+
+def test_blur_mode_sets_fill_label_via_process(tmp_path: Path) -> None:
+    """A full process() pass in blur mode routes to the blur fill once the badge
+    is acquired (no temporal/inpaint)."""
+    rem = _remover(tmp_path, threshold=0.3, removal="blur")
+    frame = _stamp(_textured_frame(), _make_watermark_template(), 300, 60)
+    rem.process(frame)
+    assert rem._last_fill == "blur"
+
+
 def test_scale_locks_only_on_confident_match(tmp_path: Path) -> None:
     """A marginal match must not change the locked scale (the 0.70 drift that
     left the badge undersized); only a confident (>= acquire) match locks it."""

@@ -80,6 +80,7 @@ class RunOptions:
     remove_watermark: bool = False
     watermark_template: str | None = None
     watermark_method: str = "template"
+    watermark_removal: str = "reconstruct"  # "reconstruct" | "blur"
     watermark_threshold: float = 0.50
     watermark_inpaint_radius: int = 3
     watermark_template_width: int | None = None  # capture-frame width (scale center)
@@ -312,6 +313,7 @@ def _build_watermark_remover(opts: RunOptions) -> Any:
         if template is None:
             template = bundled_template_path()
         method = "threshold" if opts.watermark_method == "threshold" else "template"
+        removal = "blur" if opts.watermark_removal == "blur" else "reconstruct"
         if method == "template" and template is None:
             print(
                 "[runtime] watermark removal on but no template available — "
@@ -326,6 +328,7 @@ def _build_watermark_remover(opts: RunOptions) -> Any:
         ref_width = opts.watermark_template_width or 1280
         params = WatermarkParams(
             method=method,
+            removal=removal,
             template_path=template,
             threshold=opts.watermark_threshold,
             inpaint_radius=opts.watermark_inpaint_radius,
@@ -336,7 +339,7 @@ def _build_watermark_remover(opts: RunOptions) -> Any:
         print(
             f"[runtime] watermark removal ON · template="
             f"{'custom' if is_custom else 'bundled'} ({template.name}) · "
-            f"method={method} · gate={opts.watermark_threshold}",
+            f"method={method} · removal={removal} · gate={opts.watermark_threshold}",
             flush=True,
         )
         return WatermarkRemover(params)
