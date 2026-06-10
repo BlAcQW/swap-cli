@@ -39,16 +39,11 @@ class Display:
         on_quit: callable = lambda: None,  # type: ignore[assignment]
         virtual_camera: bool = False,
         watermark: WatermarkRemover | None = None,
-        show_window: bool = True,
     ) -> None:
         self._track = track
         self._record_path = record_path
         self._on_quit = on_quit
         self._virtual_camera = virtual_camera
-        # Show the cv2 preview window. False in GUI mode: the session runs on a
-        # worker thread, and macOS forbids OpenCV HighGUI off the main thread, so
-        # the GUI renders frames itself (tkinter, main thread) via latest_frame().
-        self._show_window = show_window
         # Sprint 15: optional per-frame watermark remover. None = no-op.
         # Injected as a configured instance so _loop stays thin and the
         # remover is unit-testable in isolation.
@@ -79,8 +74,7 @@ class Display:
             with suppress(Exception):
                 self._vcam.close()
             self._vcam = None
-        if self._show_window:
-            cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
 
     def snapshot(self, dest: Path) -> bool:
         """Save the most recent rendered frame as JPEG. Returns success."""
@@ -89,19 +83,9 @@ class Display:
         dest.parent.mkdir(parents=True, exist_ok=True)
         return cv2.imwrite(str(dest), self._latest_bgr)
 
-    def latest_frame(self) -> np.ndarray | None:
-        """Most recent processed (cleaned) frame — for the in-app GUI preview.
-        The render loop rebinds this each frame, so the read is atomic."""
-        return self._latest_bgr
-
-    def latest_raw_frame(self) -> np.ndarray | None:
-        """Most recent RAW (pre-removal) frame — for GUI watermark capture."""
-        return self._latest_raw_bgr
-
     async def _loop(self) -> None:
-        if self._show_window:
-            cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(WINDOW_TITLE, 960, 540)
+        cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW_TITLE, 960, 540)
         first_frame = True
         try:
             while not self._stopped.is_set():
@@ -117,6 +101,7 @@ class Display:
                 self._maybe_init_writer(bgr.shape, fps_guess=20)
                 if self._writer is not None:
                     self._writer.write(bgr)
+                cv2.imshow(WINDOW_TITLE, bgr)
                 # Sprint 14k: also push the frame to the OBS Virtual Camera
                 # driver so Zoom/Meet/Discord pick it up as a real camera.
                 # pyvirtualcam expects RGB.
@@ -130,15 +115,6 @@ class Display:
                         except Exception as err:  # noqa: BLE001
                             print(f"[display] vcam send error: {err}", flush=True)
                             # Don't tear the driver down on a single bad frame.
-                if not self._show_window:
-                    # GUI renders the preview itself (tkinter, main thread) and
-                    # drives capture/stop — no cv2 window/keys here. Yield so a
-                    # non-vcam session doesn't spin the loop hot.
-                    if not self._virtual_camera:
-                        await asyncio.sleep(0)
-                    first_frame = False
-                    continue
-                cv2.imshow(WINDOW_TITLE, bgr)
                 if first_frame:
                     # Flash topmost so the cv2 window pops above the tk GUI on
                     # Windows. We don't want it pinned forever — just one beat.
@@ -166,20 +142,11 @@ class Display:
                 self._on_quit()
             self._stopped.set()
         finally:
-            if self._show_window:
-                cv2.destroyAllWindows()
+            cv2.destroyAllWindows()
 
-    def capture_watermark(self, roi: tuple[int, int, int, int]) -> None:
-        """Public entry for the GUI: capture the badge template from a caller-
-        supplied ROI (the GUI's tk drag-selector), instead of cv2.selectROI."""
-        self._capture_watermark_template(roi=roi)
-
-    def _capture_watermark_template(
-        self, roi: tuple[int, int, int, int] | None = None
-    ) -> None:
-        """Select the watermark on the current frame and save it as the template
-        PNG (Sprint 15). `roi` is supplied by the GUI's tk selector; when None
-        (CLI / cv2-window mode) we fall back to cv2.selectROI on the W key.
+    def _capture_watermark_template(self) -> None:
+        """Drag-select the watermark on the current frame and save it as the
+        template PNG (Sprint 15). Bound to the `w` key in the preview window.
 
         Captures from the RAW (pre-removal) frame so it works even while
         removal is on but not matching. Persists the path AND the frame width
@@ -196,13 +163,12 @@ class Display:
         try:
             from . import config as _config
 
-            if roi is None:
-                roi = cv2.selectROI(
-                    "select watermark — ENTER to save, C to cancel",
-                    source,
-                    showCrosshair=False,
-                )
-                cv2.destroyWindow("select watermark — ENTER to save, C to cancel")
+            roi = cv2.selectROI(
+                "select watermark — ENTER to save, C to cancel",
+                source,
+                showCrosshair=False,
+            )
+            cv2.destroyWindow("select watermark — ENTER to save, C to cancel")
             x, y, w, h = (int(v) for v in roi)
             if w <= 0 or h <= 0:
                 print("[display] watermark capture cancelled.", flush=True)
