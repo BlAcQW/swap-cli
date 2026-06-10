@@ -11,9 +11,10 @@ import asyncio
 import sys
 import threading
 import tkinter as tk
+from contextlib import suppress
 from pathlib import Path
 from tkinter import filedialog
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import customtkinter as ctk
 from PIL import Image
@@ -116,6 +117,12 @@ class SwapGUI(ctk.CTk):
         # Set by runtime.run_session via the on_runtime_ready callback. Calling
         # this from the tk main thread cleanly winds the session down.
         self._stop_session: Callable[[], None] | None = None
+        # macOS only: the GUI pumps the cv2 preview window from the MAIN thread
+        # (macOS forbids cv2 windows off the main thread, and the session runs on
+        # a worker thread). _display is handed over via on_display_ready.
+        self._display: Any = None
+        self._mac_preview_after_id: str | None = None
+        self._mac_window_open = False
         # Voice-only test state (no Decart). Independent of _session_thread.
         self._voice_test_thread: threading.Thread | None = None
         self._voice_test_loop: asyncio.AbstractEventLoop | None = None
@@ -660,6 +667,11 @@ class SwapGUI(ctk.CTk):
         def _capture_stop(stop_fn: Callable[[], None]) -> None:
             self._stop_session = stop_fn
 
+        def _on_display_ready(disp: Any) -> None:
+            # Worker thread → just store the ref; the main-thread mac preview
+            # loop reads disp.latest_frame() to pump the cv2 window.
+            self._display = disp
+
         # Voice opts: only set when toggle is on AND a library/user voice is
         # picked. We resolve the mic + virtual cable here using
         # voice_router's auto-detect so the user doesn't have to pick from
@@ -694,6 +706,11 @@ class SwapGUI(ctk.CTk):
             record=record_path,
             on_status_change=_emit_status,
             on_runtime_ready=_capture_stop,
+            # macOS: the GUI pumps the cv2 window from the main thread (cv2 can't
+            # open a window off the main thread on macOS). Windows/Linux keep the
+            # original behaviour — the Display owns the window on its own thread.
+            show_preview_window=(sys.platform != "darwin"),
+            on_display_ready=(_on_display_ready if sys.platform == "darwin" else None),
             reference_voice=voice_id,
             microphone_device=mic_device,
             voice_output_device=out_device,
@@ -755,6 +772,10 @@ class SwapGUI(ctk.CTk):
         self._session_thread = threading.Thread(target=worker, daemon=True)
         self._session_thread.start()
 
+        # macOS: drive the cv2 preview window from the main thread.
+        if sys.platform == "darwin":
+            self._start_mac_preview()
+
         # Best-effort license check (non-blocking).
         threading.Thread(target=self._check_license_async, daemon=True).start()
 
@@ -810,6 +831,57 @@ class SwapGUI(ctk.CTk):
         # `finally` will reset _set_running(False) when the loop fully unwinds.
         self._stop_btn.configure(state="disabled")
         self._stop_session = None
+
+    # ── macOS: pump the cv2 preview window from the main thread ─────────
+    # (macOS forbids cv2 windows off the main thread; the session runs on a
+    #  worker thread. The window is the SAME cv2 window as on Windows.)
+
+    def _start_mac_preview(self) -> None:
+        self._mac_window_open = False
+        self._mac_preview_tick()
+
+    def _mac_preview_tick(self) -> None:
+        # Session ended → tear the window down and stop the loop.
+        if self._session_thread is None or not self._session_thread.is_alive():
+            self._close_mac_preview()
+            return
+        disp = self._display
+        frame = disp.latest_frame() if disp is not None else None
+        if frame is not None:
+            try:
+                import cv2
+
+                from .display import WINDOW_TITLE
+
+                if not self._mac_window_open:
+                    cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow(WINDOW_TITLE, 960, 540)
+                    self._mac_window_open = True
+                cv2.imshow(WINDOW_TITLE, frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), ord("Q"), 27):  # Q / ESC → stop
+                    self._on_stop()
+                elif key in (ord("w"), ord("W")):  # W → capture watermark
+                    try:
+                        disp.capture_watermark(None)  # cv2.selectROI on main thread
+                    except Exception as err:
+                        self._status_var.set(f"Capture failed: {err}")
+            except Exception:  # preview is best-effort; never crash the GUI
+                pass
+        self._mac_preview_after_id = self.after(33, self._mac_preview_tick)
+
+    def _close_mac_preview(self) -> None:
+        if self._mac_preview_after_id is not None:
+            with suppress(Exception):
+                self.after_cancel(self._mac_preview_after_id)
+            self._mac_preview_after_id = None
+        if self._mac_window_open:
+            with suppress(Exception):
+                import cv2
+
+                cv2.destroyAllWindows()
+            self._mac_window_open = False
+        self._display = None
 
     def _on_enable_voice(self) -> None:
         """Open the Enable Voice modal: prereq check + guided install."""
@@ -1007,6 +1079,9 @@ class SwapGUI(ctk.CTk):
         return label_to_id.get(self._voice_var.get())
 
     def _set_running(self, running: bool) -> None:
+        if not running:
+            # Session ended (stop / drop / error) → close the macOS preview loop.
+            self._close_mac_preview()
         self._live_btn.configure(state="disabled" if running else "normal")
         self._stop_btn.configure(state="normal" if running else "disabled")
         self._select_face_btn.configure(state="disabled" if running else "normal")

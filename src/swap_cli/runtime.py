@@ -66,6 +66,13 @@ class RunOptions:
     # the session is set up. Calling that function from any thread cleanly
     # winds down the live session.
     on_runtime_ready: Callable[[Callable[[], None]], None] | None = None
+    # Show the cv2 preview window from the Display's own (worker-thread) loop.
+    # False on macOS GUI: the GUI pumps the SAME cv2 window from the main thread
+    # (macOS forbids cv2 windows off the main thread). Windows/CLI keep True.
+    show_preview_window: bool = True
+    # Optional callback handed the live Display once created, so the macOS GUI
+    # can read frames (latest_frame()) to drive the window + watermark capture.
+    on_display_ready: Callable[[Any], None] | None = None
     # Voice cloning (optional, sprint 13). All None = video-only, current behavior.
     # When all three are set, run_session will spin a parallel voice task in 13b.
     reference_voice: str | None = None  # voice id (library) or path to WAV/MP3
@@ -162,6 +169,8 @@ async def run_session(opts: RunOptions) -> None:
                             display_box=display_box,
                             virtual_camera=opts.virtual_camera,
                             watermark=_build_watermark_remover(opts),
+                            show_window=opts.show_preview_window,
+                            on_display_ready=opts.on_display_ready,
                         ),
                         initial_state=ModelState(
                             prompt=Prompt(text=opts.prompt, enhance=True),
@@ -366,6 +375,8 @@ def _on_remote_stream(
     display_box: list[Display | None],
     virtual_camera: bool = False,
     watermark: Any = None,
+    show_window: bool = True,
+    on_display_ready: Callable[[Any], None] | None = None,
 ) -> None:
     record_path = record if record is not None else None
     if record is not None and not record.is_absolute():
@@ -379,9 +390,13 @@ def _on_remote_stream(
         on_quit=quit_event.set,
         virtual_camera=virtual_camera,
         watermark=watermark,
+        show_window=show_window,
     )
     disp.start()
     display_box[0] = disp
+    if on_display_ready is not None:
+        with suppress(Exception):
+            on_display_ready(disp)
 
 
 def _build_set_input(prompt: str, reference: str) -> Any:
