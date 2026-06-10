@@ -151,10 +151,15 @@ _SEARCH_MULTIPLIERS = (1.0, 0.85, 1.15, 0.7, 1.3)
 _LOG_EVERY = 20  # throttle diagnostics to ~1/sec at 20fps
 _UNLOCK_AFTER_MISSES = 15  # re-open the scale search after this many misses
 
-# Default template shipped with the package (a crop of the Decart "AI
-# Generated" pill). Lets watermark removal work out of the box without the
-# user capturing their own — they only recapture if Decart restyles it.
+# Default template shipped with the package (a clean crop of the Decart
+# "✦ AI Generated" badge). Lets watermark removal work out of the box without
+# the user capturing their own — they only recapture if Decart restyles it.
 _BUNDLED_TEMPLATE = Path(__file__).resolve().parent / "assets" / "watermark_default.png"
+# Frame width the bundled template was cropped from, so the multi-scale search
+# centers on the real badge size at any stream resolution. The bundled badge was
+# cropped from a 954-wide capture of the Decart output (the badge is the same
+# graphic for every user; only the scale varies with output resolution).
+BUNDLED_TEMPLATE_REF_WIDTH = 954
 
 
 def bundled_template_path() -> Path | None:
@@ -260,9 +265,15 @@ class WatermarkRemover:
                 flush=True,
             )
             return None
-        # A user-captured template records the frame width it was grabbed at
-        # so the scale search centers exactly; the bundled default is 1280.
-        ref_width = getattr(cfg, "watermark_template_width", None) or 1280
+        # A user-captured template records the frame width it was grabbed at so
+        # the scale search centers exactly; the bundled default uses its own
+        # known crop width.
+        is_custom = bool(cfg.watermark_template)
+        ref_width = (
+            (getattr(cfg, "watermark_template_width", None) or 1280)
+            if is_custom
+            else BUNDLED_TEMPLATE_REF_WIDTH
+        )
         params = WatermarkParams(
             method=method,
             template_path=template,

@@ -32,9 +32,11 @@ cv2 = pytest.importorskip("cv2")
 np = pytest.importorskip("numpy")
 
 from swap_cli.watermark import (  # noqa: E402
+    BUNDLED_TEMPLATE_REF_WIDTH,
     WatermarkParams,
     WatermarkRemover,
     _roi_to_px,
+    bundled_template_path,
 )
 
 # --- helpers ---------------------------------------------------------------
@@ -808,6 +810,28 @@ def test_suppress_pattern_catches_cancelled_error() -> None:
 
     with suppress(Exception, asyncio.CancelledError):
         raise asyncio.CancelledError()  # swallowed — no raise
+
+
+def test_bundled_template_exists_and_loads() -> None:
+    """The packaged default badge template ships and is a real image, so
+    out-of-box removal needs no capture step."""
+    path = bundled_template_path()
+    assert path is not None and path.is_file()
+    img = cv2.imread(str(path))
+    assert img is not None and img.size > 0
+
+
+def test_bundled_template_uses_its_own_ref_width() -> None:
+    """When no template is captured, the remover falls back to the bundled
+    default and uses BUNDLED_TEMPLATE_REF_WIDTH (not the 1280 custom default),
+    so the scale search centers on the real badge size."""
+    from swap_cli import config as cfgmod
+
+    base = cfgmod.Config("L", "dct", None, None)
+    cfg = base.__class__(**{**base.__dict__, "remove_watermark": True, "watermark_template": None})
+    rem = WatermarkRemover.from_config(cfg, enabled=True)
+    assert rem is not None
+    assert rem._params.template_ref_width == BUNDLED_TEMPLATE_REF_WIDTH
 
 
 if __name__ == "__main__":

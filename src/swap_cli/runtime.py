@@ -305,7 +305,12 @@ def _build_watermark_remover(opts: RunOptions) -> Any:
     if not opts.remove_watermark:
         return None
     try:
-        from .watermark import WatermarkParams, WatermarkRemover, bundled_template_path
+        from .watermark import (
+            BUNDLED_TEMPLATE_REF_WIDTH,
+            WatermarkParams,
+            WatermarkRemover,
+            bundled_template_path,
+        )
 
         # User's captured template wins; otherwise fall back to the bundled
         # default so removal works out of the box (no capture step).
@@ -323,9 +328,14 @@ def _build_watermark_remover(opts: RunOptions) -> Any:
             )
             return None
         # A captured template carries the width it was grabbed at so the
-        # scale search centers exactly; the bundled default assumes 1280.
+        # scale search centers exactly; the bundled default uses its own known
+        # crop width.
         is_custom = bool(opts.watermark_template)
-        ref_width = opts.watermark_template_width or 1280
+        ref_width = (
+            (opts.watermark_template_width or 1280)
+            if is_custom
+            else BUNDLED_TEMPLATE_REF_WIDTH
+        )
         params = WatermarkParams(
             method=method,
             removal=removal,
