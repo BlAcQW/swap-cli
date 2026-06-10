@@ -22,6 +22,22 @@ from .display import Display, default_recording_path
 CONNECT_TIMEOUT_S = 45.0
 
 
+def _is_harmless_ice_noise(context: dict) -> bool:
+    """True for the benign aioice STUN teardown noise.
+
+    When a WebRTC connection drops, aioice's retry timer can fire *after* the
+    STUN transaction's future is already done and call ``set_exception`` on it,
+    raising ``asyncio.InvalidStateError`` from inside the ``Transaction.__retry``
+    callback. asyncio logs it as "Exception in callback". It does not affect our
+    own teardown (which we handle explicitly), so we swallow just this to keep
+    the console clean during network blips. Everything else is left untouched.
+    """
+    if isinstance(context.get("exception"), asyncio.InvalidStateError):
+        return True
+    blob = f"{context.get('message', '')} {context.get('handle', '')}"
+    return "Transaction.__retry" in blob
+
+
 def _noop_status(_msg: str) -> None:
     return None
 
@@ -97,16 +113,31 @@ async def run_session(opts: RunOptions) -> None:
     client = DecartClient(api_key=opts.decart_api_key)
     quit_event = asyncio.Event()
     notify = opts.on_status_change
+
+    # Keep connection-drop noise off the console (the user demos to clients).
+    # aioice fires a harmless InvalidStateError from a STUN retry timer during
+    # teardown; swallow only that, delegate everything else to the prior handler.
+    running_loop = asyncio.get_running_loop()
+    _prev_exc_handler = running_loop.get_exception_handler()
+
+    def _quiet_loop_exceptions(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        if _is_harmless_ice_noise(context):
+            return
+        if _prev_exc_handler is not None:
+            _prev_exc_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    running_loop.set_exception_handler(_quiet_loop_exceptions)
     voice_track: Any = None  # populated by _maybe_start_voice if opts say so
 
     # Hand the caller a thread-safe stop function. The GUI's Stop button
     # calls this from the tk main thread; we schedule quit_event.set() on
     # this asyncio loop via call_soon_threadsafe.
     if opts.on_runtime_ready is not None:
-        loop = asyncio.get_running_loop()
 
         def _request_stop() -> None:
-            loop.call_soon_threadsafe(quit_event.set)
+            running_loop.call_soon_threadsafe(quit_event.set)
 
         opts.on_runtime_ready(_request_stop)
 
@@ -173,11 +204,26 @@ async def run_session(opts: RunOptions) -> None:
         realtime_client.on("generation_tick", _on_tick)
 
         # Apply the reference identity (URL or local file path; bytes also OK).
+        # If the connection drops mid-send, the SDK surfaces a "Image send timed
+        # out" error — a consequence of the drop, not a bug. Degrade to a clean
+        # one-liner + graceful teardown instead of letting a traceback escape.
         if opts.reference:
             notify("Applying reference identity…")
-            await realtime_client.set(
-                _build_set_input(opts.prompt, opts.reference),
-            )
+            try:
+                await realtime_client.set(
+                    _build_set_input(opts.prompt, opts.reference),
+                )
+            except asyncio.CancelledError:
+                raise  # genuine cancellation → GUI handles it gracefully
+            except Exception as exc:  # a drop mid-send must not crash the session
+                reason = "connection dropped" if quit_event.is_set() else str(exc)
+                print(
+                    f"[runtime] reference identity not applied — {reason}; "
+                    "ending session",
+                    flush=True,
+                )
+                notify("Session ended — connection interrupted.")
+                return  # finally-block teardown still runs (disconnect, camera…)
 
         notify("Connected · waiting for first frame…")
 

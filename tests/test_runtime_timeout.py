@@ -17,9 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 
-def test_connect_timeout_above_reconnect_floor() -> None:
-    """Must be ≥ 30 s so back-to-back sessions don't false-timeout."""
-    # Stub the heavy transitive imports the runtime module pulls in.
+def _install_stubs() -> None:
+    """Stub the heavy transitive imports the runtime module pulls in, so it can
+    be imported in a test env without decart/aiortc/av installed."""
     import types
     from unittest.mock import MagicMock
 
@@ -37,11 +37,41 @@ def test_connect_timeout_above_reconnect_floor() -> None:
                 setattr(m, k, v)
             sys.modules[name] = m
 
+
+def test_connect_timeout_above_reconnect_floor() -> None:
+    """Must be ≥ 30 s so back-to-back sessions don't false-timeout."""
+    _install_stubs()
     from swap_cli.runtime import CONNECT_TIMEOUT_S
 
     assert CONNECT_TIMEOUT_S >= 30.0, (
         f"CONNECT_TIMEOUT_S={CONNECT_TIMEOUT_S} — below 30 s reintroduces "
         "the Sprint 14m bug where back-to-back sessions timeout mid-handshake"
+    )
+
+
+def test_harmless_ice_noise_filter() -> None:
+    """The loop-exception filter swallows ONLY the benign aioice STUN teardown
+    noise (InvalidStateError from the Transaction.__retry timer), and lets every
+    other loop exception through to the default handler."""
+    import asyncio
+
+    _install_stubs()
+    from swap_cli.runtime import _is_harmless_ice_noise
+
+    # Benign: the exact aioice STUN-retry race that printed during drops.
+    assert _is_harmless_ice_noise(
+        {
+            "exception": asyncio.InvalidStateError("invalid state"),
+            "message": "Exception in callback Transaction.__retry()",
+        }
+    )
+    # Also matched by the callback name even without the exception object.
+    assert _is_harmless_ice_noise(
+        {"message": "Exception in callback Transaction.__retry()"}
+    )
+    # A real error must NOT be swallowed.
+    assert not _is_harmless_ice_noise(
+        {"exception": ValueError("boom"), "message": "Exception in callback foo"}
     )
 
 
