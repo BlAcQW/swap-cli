@@ -59,12 +59,14 @@ class WatermarkParams:
     # leaves the watermark visible (bad), a rare false positive is a small
     # upper-frame smudge (minor). Tuned against the bundled template.
     threshold: float = 0.50  # ACQUIRE gate: confidence to first lock onto the badge
-    # MAINTAIN gate: once locked, keep tracking through dips at this lower bar.
-    # The badge is always present, so matchTemplate's best location is the best
-    # estimate of where it is even at low confidence — following it beats
-    # coasting a stale box. Floored just above the no-badge top-hat noise
-    # (~0.1–0.2) so we don't chase pure noise.
-    maintain_threshold: float = 0.28
+    # MAINTAIN gate: once locked, keep tracking through dips at this bar. Set
+    # close to ACQUIRE so we only fill when genuinely confident — a low gate let
+    # the lock COAST onto a wrong bright spot over busy/low-contrast scenes
+    # (skin, blinds, the bright corner) and reconstruct then painted a misplaced
+    # patch while the real roaming badge stayed visible. The real badge scores
+    # 0.65-0.94 when detected, so it stays locked; drifted locks (0.30-0.46) are
+    # released so we don't fill (badge may briefly show) instead of a wrong patch.
+    maintain_threshold: float = 0.45
     # Isolate the bright text via white top-hat before matchTemplate, making
     # the match background-invariant for the semi-transparent badge.
     text_isolate: bool = True
@@ -88,11 +90,11 @@ class WatermarkParams:
     # ~27ms/frame at 1280x720 — within the 20fps (50ms) budget.
     detect_scale: float = 0.6
     redetect_every: int = 1  # run detection every N frames
-    # Track-and-hold: the real badge's match confidence dips below the gate on
-    # ~1/3 of frames; without this the badge flashes back on every dip. On a
-    # miss we reuse the last confident box for up to hold_frames (the badge
-    # barely moves in that span) so removal stays steady.
-    hold_frames: int = 15
+    # Track-and-hold: on a brief miss, reuse the last confident box for up to
+    # hold_frames so removal stays steady through a dip. Kept short: the badge
+    # roams to RANDOM positions, so coasting a stale box for long just holds the
+    # wrong spot — release quickly and re-acquire instead.
+    hold_frames: int = 5
     # When tracking, search the match map within a window of this fraction of
     # frame width around the badge's last position, so a faint badge isn't lost
     # to a far background look-alike (the wrong-location "full badge" misses).

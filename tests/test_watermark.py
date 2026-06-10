@@ -431,8 +431,10 @@ def _wide_scene(badge_xy, badge_alpha, blinds_xy=None):
 
 
 def test_local_search_ignores_far_distractor(tmp_path: Path) -> None:
-    """A faint badge near the last position must win over a stronger far
-    background look-alike (the 'full badge showed' wrong-location misses)."""
+    """A badge still tracked within the maintain band must win over a far
+    background look-alike (the 'full badge showed' wrong-location misses). With
+    the safer gate we no longer track a sub-0.45 badge — that's released by
+    design — so this exercises a confidently-tracked (but dipped) badge."""
     rem = WatermarkRemover(
         WatermarkParams(template_path=_text_template(tmp_path), template_ref_width=1088,
                         detect_scale=0.6)
@@ -441,11 +443,28 @@ def test_local_search_ignores_far_distractor(tmp_path: Path) -> None:
     rem._detect(_wide_scene(badge, 0.7))  # acquire (strong) → locks scale
     rem._last_center = (badge[0] + 100, badge[1] + 26)  # tracking near the badge
 
-    frame = _wide_scene(badge, 0.22, blinds_xy=(800, 470))  # faint badge + far distractor
+    frame = _wide_scene(badge, 0.5, blinds_xy=(800, 470))  # tracked badge + far distractor
     box, _conf = rem._detect(frame)
     assert box is not None
     cx = box[0] + box[2] // 2
     assert abs(cx - (badge[0] + 100)) < 80  # stayed on the badge, not 500px away
+
+
+def test_safer_gate_releases_drifted_lock(tmp_path: Path, monkeypatch) -> None:
+    """Safer gate: after acquiring, sustained sub-maintain (drifted) matches must
+    RELEASE the lock rather than coast on it — so reconstruct stops filling the
+    wrong spot. A match of 0.35 (above the old 0.28 gate, below the new 0.45)
+    is the drift case that used to paint a misplaced patch."""
+    rem = _remover(tmp_path, threshold=0.5)  # default maintain=0.45, hold=5
+    box = (300, 60, WM_W, WM_H)
+    monkeypatch.setattr(rem, "_detect", lambda _g: (box, 0.8))  # confident acquire
+    rem.process(_textured_frame())
+    assert rem._held_box is not None
+
+    monkeypatch.setattr(rem, "_detect", lambda _g: (box, 0.35))  # drifted/weak
+    for _ in range(rem._params.hold_frames + 1):
+        rem.process(_textured_frame())
+    assert rem._held_box is None  # released — no fill on the weak/drifted lock
 
 
 def test_reacquires_jumped_badge_immediately(tmp_path: Path) -> None:
