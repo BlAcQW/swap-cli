@@ -217,15 +217,18 @@ class SwapGUI(ctk.CTk):
             opts,
             text="Remove watermark",
             variable=self._watermark_var,
+            command=self._sync_watermark_options,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
 
-        # Removal style (only used when "Remove watermark" is on). Reconstruct
-        # rebuilds the real background behind the roaming badge (invisible, best
-        # quality); Blur just smears the badge into an unreadable soft patch
-        # (always works, no reconstruction artifacts, but a visible soft blob).
-        # Seeded from the saved preference; read at start-time like the toggle.
+        # Removal style (only used when "Remove watermark" is on, so the whole
+        # row is hidden while removal is off). Reconstruct rebuilds the real
+        # background behind the roaming badge (invisible, best quality); Blur
+        # just smears the badge into an unreadable soft patch (always works, no
+        # reconstruction artifacts, but a visible soft blob). Seeded from the
+        # saved preference; read at start-time like the toggle.
         _wm_cfg = config.load()
-        removal_row = ctk.CTkFrame(opts, fg_color="transparent")
+        self._watermark_removal_row = ctk.CTkFrame(opts, fg_color="transparent")
+        removal_row = self._watermark_removal_row
         removal_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4))
         ctk.CTkLabel(
             removal_row, text="Removal style", anchor="w", font=ctk.CTkFont(size=11)
@@ -248,6 +251,7 @@ class SwapGUI(ctk.CTk):
             wraplength=460,
             justify="left",
         ).pack(anchor="w", pady=(2, 0))
+        self._sync_watermark_options()  # hide the picker if removal starts off
 
         # Model selector. Decart fixes width/height/fps per model — we display
         # the native dimensions next to each option so the user knows what
@@ -589,6 +593,17 @@ class SwapGUI(ctk.CTk):
         # Labels look like "lucy-2  (1280×720, 20 fps)" — take the first token.
         v = self._tier_var.get()
         return v.split()[0] if v else "lucy-2"
+
+    def _sync_watermark_options(self) -> None:
+        """Show the removal-style picker only when watermark removal is on —
+        there's nothing to configure when it's off."""
+        row = getattr(self, "_watermark_removal_row", None)
+        if row is None:
+            return
+        if bool(self._watermark_var.get()):
+            row.grid()  # restores prior grid options
+        else:
+            row.grid_remove()
 
     def _on_live(self) -> None:
         print("[gui] live clicked", flush=True)
