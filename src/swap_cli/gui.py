@@ -11,9 +11,10 @@ import asyncio
 import sys
 import threading
 import tkinter as tk
+from contextlib import suppress
 from pathlib import Path
 from tkinter import filedialog
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import customtkinter as ctk
 from PIL import Image
@@ -116,6 +117,14 @@ class SwapGUI(ctk.CTk):
         # Set by runtime.run_session via the on_runtime_ready callback. Calling
         # this from the tk main thread cleanly winds the session down.
         self._stop_session: Callable[[], None] | None = None
+        # In-app live preview (macOS-safe: rendered on the tk main thread instead
+        # of an OpenCV window). _display is the live Display, handed over via
+        # on_display_ready; the rest is the preview-window/render-loop state.
+        self._display: Any = None
+        self._preview_win: ctk.CTkToplevel | None = None
+        self._preview_label: ctk.CTkLabel | None = None
+        self._preview_image: ctk.CTkImage | None = None
+        self._preview_after_id: str | None = None
         # Voice-only test state (no Decart). Independent of _session_thread.
         self._voice_test_thread: threading.Thread | None = None
         self._voice_test_loop: asyncio.AbstractEventLoop | None = None
@@ -471,7 +480,7 @@ class SwapGUI(ctk.CTk):
         # Footer (pinned)
         ctk.CTkLabel(
             bottom,
-            text="swap-cli — Press Q in the preview window to stop",
+            text="swap-cli — click Stop (or close the preview) to end the session",
             font=ctk.CTkFont(size=10),
             text_color="#6b7280",
         ).pack(pady=(8, 0))
@@ -660,6 +669,11 @@ class SwapGUI(ctk.CTk):
         def _capture_stop(stop_fn: Callable[[], None]) -> None:
             self._stop_session = stop_fn
 
+        def _on_display_ready(disp: Any) -> None:
+            # Called from the worker thread; just store the ref. The main-thread
+            # render loop (started below) picks it up to draw frames.
+            self._display = disp
+
         # Voice opts: only set when toggle is on AND a library/user voice is
         # picked. We resolve the mic + virtual cable here using
         # voice_router's auto-detect so the user doesn't have to pick from
@@ -694,6 +708,8 @@ class SwapGUI(ctk.CTk):
             record=record_path,
             on_status_change=_emit_status,
             on_runtime_ready=_capture_stop,
+            show_preview_window=False,  # render in-app (macOS-safe), not a cv2 window
+            on_display_ready=_on_display_ready,
             reference_voice=voice_id,
             microphone_device=mic_device,
             voice_output_device=out_device,
@@ -755,6 +771,9 @@ class SwapGUI(ctk.CTk):
         self._session_thread = threading.Thread(target=worker, daemon=True)
         self._session_thread.start()
 
+        # Open the in-app live preview (tk main thread) and start polling frames.
+        self._open_preview()
+
         # Best-effort license check (non-blocking).
         threading.Thread(target=self._check_license_async, daemon=True).start()
 
@@ -810,6 +829,116 @@ class SwapGUI(ctk.CTk):
         # `finally` will reset _set_running(False) when the loop fully unwinds.
         self._stop_btn.configure(state="disabled")
         self._stop_session = None
+
+    # ── In-app live preview (macOS-safe: tk main thread, not a cv2 window) ──
+
+    def _open_preview(self) -> None:
+        """Open the live preview window and start polling frames on the main
+        thread. Replaces the cv2 window, which can't run off the main thread on
+        macOS (the session runs on a worker thread)."""
+        self._close_preview()
+        win = ctk.CTkToplevel(self)
+        win.title("swap — Lucy 2 live")
+        win.geometry("900x600")
+        self._preview_win = win
+        self._preview_label = ctk.CTkLabel(win, text="Connecting…")
+        self._preview_label.pack(fill="both", expand=True, padx=8, pady=8)
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkButton(
+            bar, text="Capture watermark", command=self._on_capture_watermark
+        ).pack(side="left")
+        ctk.CTkButton(
+            bar, text="Stop", fg_color="#b91c1c", hover_color="#991b1b",
+            command=self._on_stop,
+        ).pack(side="right")
+        # Closing the preview window ends the session (mirrors the old Q-to-quit).
+        win.protocol("WM_DELETE_WINDOW", self._on_stop)
+        self._preview_after_id = self.after(100, self._render_preview)
+
+    def _render_preview(self) -> None:
+        win = self._preview_win
+        if win is None or not win.winfo_exists():
+            return
+        disp = self._display
+        frame = disp.latest_frame() if disp is not None else None
+        if frame is not None and self._preview_label is not None:
+            try:
+                img = Image.fromarray(frame[:, :, ::-1].copy())  # BGR→RGB
+                w, h = img.size
+                scale = min(884 / w, 500 / h, 1.0)
+                size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                self._preview_image = ctk.CTkImage(light_image=img, dark_image=img, size=size)
+                self._preview_label.configure(image=self._preview_image, text="")
+            except Exception:  # preview is best-effort; never crash the GUI
+                pass
+        # ~20 fps preview; the virtual camera still runs full-rate on the worker.
+        self._preview_after_id = self.after(50, self._render_preview)
+
+    def _close_preview(self) -> None:
+        if self._preview_after_id is not None:
+            with suppress(Exception):
+                self.after_cancel(self._preview_after_id)
+            self._preview_after_id = None
+        if self._preview_win is not None:
+            with suppress(Exception):
+                self._preview_win.destroy()
+        self._preview_win = None
+        self._preview_label = None
+        self._preview_image = None
+        self._display = None
+
+    def _on_capture_watermark(self) -> None:
+        """Grab the current RAW frame and let the user box the badge (tk drag
+        selector) — the cross-platform replacement for the cv2 W-key capture."""
+        disp = self._display
+        frame = disp.latest_raw_frame() if disp is not None else None
+        if frame is None:
+            self._status_var.set("No live frame yet — wait for the preview.")
+            return
+        self._select_roi_and_capture(frame)
+
+    def _select_roi_and_capture(self, frame: Any) -> None:
+        from PIL import ImageTk
+
+        h, w = frame.shape[:2]
+        scale = min(900 / w, 600 / h, 1.0)
+        dw, dh = max(1, int(w * scale)), max(1, int(h * scale))
+        photo = ImageTk.PhotoImage(Image.fromarray(frame[:, :, ::-1].copy()).resize((dw, dh)))
+        top = ctk.CTkToplevel(self)
+        top.title("Drag a box around the badge, release to capture")
+        canvas = tk.Canvas(top, width=dw, height=dh, highlightthickness=0, cursor="crosshair")
+        canvas.pack()
+        canvas.create_image(0, 0, anchor="nw", image=photo)
+        canvas._photo = photo  # keep a ref so it isn't GC'd
+        st: dict[str, Any] = {"x0": 0, "y0": 0, "rect": None}
+
+        def on_press(e: Any) -> None:
+            st["x0"], st["y0"] = e.x, e.y
+            if st["rect"] is not None:
+                canvas.delete(st["rect"])
+            st["rect"] = canvas.create_rectangle(e.x, e.y, e.x, e.y, outline="#22d3ee", width=2)
+
+        def on_drag(e: Any) -> None:
+            if st["rect"] is not None:
+                canvas.coords(st["rect"], st["x0"], st["y0"], e.x, e.y)
+
+        def on_release(e: Any) -> None:
+            rx, ry = int(min(st["x0"], e.x) / scale), int(min(st["y0"], e.y) / scale)
+            rw, rh = int(abs(e.x - st["x0"]) / scale), int(abs(e.y - st["y0"]) / scale)
+            with suppress(Exception):
+                top.destroy()
+            if rw > 5 and rh > 5 and self._display is not None:
+                try:
+                    self._display.capture_watermark((rx, ry, rw, rh))
+                    self._status_var.set("Watermark captured — removal updated.")
+                except Exception as err:
+                    self._status_var.set(f"Capture failed: {err}")
+
+        canvas.bind("<Button-1>", on_press)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        top.grab_set()
 
     def _on_enable_voice(self) -> None:
         """Open the Enable Voice modal: prereq check + guided install."""
@@ -1007,6 +1136,9 @@ class SwapGUI(ctk.CTk):
         return label_to_id.get(self._voice_var.get())
 
     def _set_running(self, running: bool) -> None:
+        if not running:
+            # Session ended (stop / drop / error) → tear down the live preview.
+            self._close_preview()
         self._live_btn.configure(state="disabled" if running else "normal")
         self._stop_btn.configure(state="normal" if running else "disabled")
         self._select_face_btn.configure(state="disabled" if running else "normal")
