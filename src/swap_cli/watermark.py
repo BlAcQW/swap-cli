@@ -128,6 +128,11 @@ class WatermarkParams:
     # the footprint's shorter side (clamped to an odd int >= 9). 0.35 reliably
     # makes the badge text unreadable without smearing far beyond it.
     blur_strength: float = 0.35
+    # Blur patch opacity (0..1) for removal="blur". 1.0 fully replaces the
+    # footprint with the blurred version (a solid smear); lower lets some of the
+    # original show through so the patch looks more transparent/natural. 0.8
+    # keeps the badge unreadable while softening the "censored blob" look.
+    blur_opacity: float = 0.8
 
 
 # Threshold-method default region when no ROI is configured: the upper
@@ -594,6 +599,9 @@ class WatermarkRemover:
             alpha = cv2.GaussianBlur(fp_sub, (k, k), 0).astype(np.float32) / 255.0
         else:
             alpha = (fp_sub > 0).astype(np.float32)
+        # Scale by blur_opacity so the patch can stay a little transparent (some
+        # of the original shows through) instead of a solid smear.
+        alpha = alpha * float(np.clip(self._params.blur_opacity, 0.0, 1.0))
         alpha = alpha[:, :, None]
         blended = bgr_sub.astype(np.float32) * (1.0 - alpha) + blurred.astype(np.float32) * alpha
 
