@@ -1,6 +1,6 @@
 [project]
 name = "swap-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "Real-time deepfake on your desktop. Bring your own Decart API key."
 authors = [{ name = "BlAcQW", email = "enochhenyo@gmail.com" }]
 readme = "README.md"
