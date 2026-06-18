@@ -40,10 +40,11 @@ dependencies = [
     # decart's realtime module imports tenacity but doesn't declare it.
     # Pin here so end users don't hit a ModuleNotFoundError at runtime.
     "tenacity>=8.2",
-    # Use the OS trust store for TLS so corporate proxies / antivirus HTTPS
-    # scanning (which inject a private root into the Windows/macOS cert store)
-    # don't break the Decart connection with CERTIFICATE_VERIFY_FAILED.
-    "truststore>=0.9",
+    # Curated public-CA bundle. A fresh Windows machine's cert store can be
+    # missing the public root for api.decart.ai (Windows fetches roots on-demand
+    # for browsers, but Python/OpenSSL doesn't) → CERTIFICATE_VERIFY_FAILED.
+    # We load this on top of the OS store so the Decart connection verifies.
+    "certifi>=2024.2",
     "aiortc>=1.9",
     "av>=11.0",
     "opencv-python>=4.10",

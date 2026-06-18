@@ -97,18 +97,29 @@ async def run_session(opts: RunOptions) -> None:
     """Open a realtime Decart session and stream until the user quits."""
     print("[runtime] entering run_session", flush=True)
 
-    # Trust the OS certificate store for TLS (must happen before aiohttp builds
-    # its SSL context below). Corporate proxies / antivirus HTTPS scanning inject
-    # a private root into the Windows/macOS store that Python's default certifi
-    # bundle doesn't have — without this the Decart connection dies with
-    # CERTIFICATE_VERIFY_FAILED. Best-effort: never block a session on it.
+    # Make TLS verification trust certifi's public-CA bundle IN ADDITION to the
+    # OS store (must happen before aiohttp builds its SSL context below). A fresh
+    # Windows machine's cert store can lack the public root for api.decart.ai
+    # (Windows fetches roots on-demand for browsers; Python/OpenSSL doesn't) →
+    # CERTIFICATE_VERIFY_FAILED. The base context still loads the OS store, so
+    # corporate/AV roots keep working too. Best-effort: never block a session.
     try:
-        import truststore
+        import ssl
 
-        truststore.inject_into_ssl()
-        print("[runtime] TLS: using OS trust store (truststore)", flush=True)
+        import certifi
+
+        _orig_create_default_context = ssl.create_default_context
+
+        def _ctx_with_certifi(*args: Any, **kwargs: Any) -> ssl.SSLContext:
+            ctx = _orig_create_default_context(*args, **kwargs)
+            with suppress(Exception):
+                ctx.load_verify_locations(certifi.where())
+            return ctx
+
+        ssl.create_default_context = _ctx_with_certifi  # type: ignore[assignment]
+        print("[runtime] TLS: trusting OS store + certifi", flush=True)
     except Exception as err:  # fall back to default certs; never block a session
-        print(f"[runtime] TLS: truststore unavailable ({err}); using default certs", flush=True)
+        print(f"[runtime] TLS: cert setup skipped ({err}); using defaults", flush=True)
 
     # Lazy import — `decart` and `aiortc` pull in heavy native deps and we
     # don't want them loaded for `swap version` / `swap config` / etc.
