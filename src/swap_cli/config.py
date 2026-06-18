@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import sys
 import tomllib
 import uuid
 from dataclasses import dataclass
@@ -71,7 +72,10 @@ def load() -> Config:
         return Config(None, None, None, None)
     try:
         data = tomllib.loads(path.read_text("utf-8"))
-    except (tomllib.TOMLDecodeError, OSError):
+    except (tomllib.TOMLDecodeError, OSError) as err:
+        # Don't pretend the config is empty — that turned a corrupt/unreadable
+        # file into a confusing "run setup" loop. Surface it so it's fixable.
+        print(f"[config] could not read {path}: {err}", file=sys.stderr)
         return Config(None, None, None, None)
 
     return Config(

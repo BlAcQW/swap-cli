@@ -88,11 +88,27 @@ def setup(
     if not license_key:
         license_key = typer.prompt("License key (SWAP-CLI-…)")
     if not decart_api_key:
-        decart_api_key = typer.prompt("Decart API key (dct_…)", hide_input=True)
+        # NOT hidden on purpose: a hidden prompt silently drops PASTED input on
+        # many Windows terminals, so the key saved empty and `doctor` then said
+        # "run setup" forever. Visible echo is fine for one-time local setup.
+        decart_api_key = typer.prompt("Decart API key (dct_…)")
+
+    license_key = (license_key or "").strip()
+    decart_api_key = (decart_api_key or "").strip()
+    # Refuse to "succeed" with empty keys — that was the silent no-op that left
+    # doctor reporting nothing set. Fail loudly instead.
+    if not license_key or not decart_api_key:
+        err_console.print(
+            "[red]Both a license key and a Decart API key are required — "
+            "nothing was saved.[/red]\n"
+            "Re-run [bold]swap setup[/bold], or pass them directly:\n"
+            '  swap setup --license "SWAP-CLI-…" --decart-key "dct_…"'
+        )
+        raise typer.Exit(2)
 
     cfg = config.update(
-        license_key=license_key.strip(),
-        decart_api_key=decart_api_key.strip(),
+        license_key=license_key,
+        decart_api_key=decart_api_key,
         # Reset the cached validation so the next launch will re-validate.
         license_cached_at=None,
         license_cached_valid_until=None,
