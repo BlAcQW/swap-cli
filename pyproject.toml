@@ -36,7 +36,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "decart>=0.0.35",
+    # Cap below 0.1.0: decart 0.1.0 (2026-06-10) is a LiveKit rewrite that
+    # expects a LiveKit-native track, but we feed it an aiortc CameraTrack
+    # ('CameraTrack' object has no attribute '_ffi_handle'). Stay on the aiortc
+    # line (<=0.0.40) until swap-cli is ported to the LiveKit SDK.
+    "decart>=0.0.35,<0.1",
     # decart's realtime module imports tenacity but doesn't declare it.
     # Pin here so end users don't hit a ModuleNotFoundError at runtime.
     "tenacity>=8.2",
