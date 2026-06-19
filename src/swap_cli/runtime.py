@@ -121,6 +121,25 @@ async def run_session(opts: RunOptions) -> None:
     except Exception as err:  # fall back to default certs; never block a session
         print(f"[runtime] TLS: cert setup skipped ({err}); using defaults", flush=True)
 
+    # decart 0.1.0 rewrote the realtime client onto LiveKit and expects a
+    # LiveKit-native track; we feed it an aiortc CameraTrack, which fails with a
+    # cryptic "'CameraTrack' object has no attribute '_ffi_handle'" retry loop.
+    # Fail fast with the exact fix instead. (pyproject pins decart<0.1, but an
+    # already-installed 0.1.x won't be downgraded by a code update alone.)
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        _dv = _pkg_version("decart")
+        _dv_mm = tuple(int(p) for p in _dv.split(".")[:2])
+    except (PackageNotFoundError, ValueError):
+        _dv, _dv_mm = "", ()
+    if _dv_mm >= (0, 1):
+        raise RuntimeError(
+            f"decart {_dv} uses the new LiveKit API, which swap-cli doesn't support "
+            'yet. Run:  pip install "decart==0.0.40"   then relaunch.'
+        )
+
     # Lazy import — `decart` and `aiortc` pull in heavy native deps and we
     # don't want them loaded for `swap version` / `swap config` / etc.
     from decart import DecartClient, models  # type: ignore[import-not-found]
