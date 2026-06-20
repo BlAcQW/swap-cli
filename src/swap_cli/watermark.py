@@ -67,6 +67,14 @@ class WatermarkParams:
     # 0.65-0.94 when detected, so it stays locked; drifted locks (0.30-0.46) are
     # released so we don't fill (badge may briefly show) instead of a wrong patch.
     maintain_threshold: float = 0.45
+    # Multi-template bank: match against the primary template PLUS this many
+    # softened (Gaussian-blurred) copies of it, taking the best score. The badge
+    # appearance varies frame-to-frame (different background bleeds through the
+    # translucent pill), so a single sharp template dips below the gate on the
+    # faint frames; a blur-tolerant variant lifts those without changing what's
+    # matched (same badge structure → same discrimination, measured promiscuity
+    # 0.16 == the primary). 0 disables (single-template behaviour).
+    template_variants: int = 2
     # Isolate the bright text via white top-hat before matchTemplate, making
     # the match background-invariant for the semi-transparent badge.
     text_isolate: bool = True
@@ -91,10 +99,20 @@ class WatermarkParams:
     detect_scale: float = 0.6
     redetect_every: int = 1  # run detection every N frames
     # Track-and-hold: on a brief miss, reuse the last confident box for up to
-    # hold_frames so removal stays steady through a dip. Kept short: the badge
-    # roams to RANDOM positions, so coasting a stale box for long just holds the
-    # wrong spot — release quickly and re-acquire instead.
+    # hold_frames so removal stays steady through a dip. Kept SHORT on purpose:
+    # the badge roams to RANDOM positions and can jump anywhere at any time, so
+    # coasting a stale box for long just holds the WRONG spot while the real
+    # badge shows elsewhere. The multi-template bank (global re-acquire every
+    # frame) and the signature net carry coverage now — they don't need a long
+    # coast — so a short hold both bridges genuine in-place flickers AND
+    # minimises stale-box risk on a teleport. (Swept on real footage: 5 gave the
+    # best coverage *and* the lowest stale-coast; longer holds overfit one clip.)
     hold_frames: int = 5
+    # While coasting (a held box through misses), grow the removal footprint by
+    # this fraction of the box per coasted frame (the badge keeps drifting
+    # during the miss), capped at coast_expand_max_frac. 0 disables.
+    coast_expand_frac: float = 0.06
+    coast_expand_max_frac: float = 0.40
     # When tracking, search the match map within a window of this fraction of
     # frame width around the badge's last position, so a faint badge isn't lost
     # to a far background look-alike (the wrong-location "full badge" misses).
@@ -123,6 +141,22 @@ class WatermarkParams:
     # center the multi-scale search on the real badge size. The bundled
     # default was cropped from a 1280-wide frame.
     template_ref_width: int = 1280
+    # Color + shape safety net (Sprint 17). An INDEPENDENT fallback detector,
+    # used only when template matching fails to acquire: it looks for the badge's
+    # invariants — a small, horizontal, low-saturation near-white, text-textured
+    # band — anywhere in the frame. Strict by design (balanced posture): it only
+    # fires on a clear badge signature, so it catches faint badges the template
+    # misses without smearing skin (saturated → fails s_max) or solid bright
+    # blocks (wrong aspect/too dense). Disable via config if it ever misbehaves.
+    signature_fallback: bool = True
+    signature_threshold: float = 0.50  # signature-fit gate (0..1) to acquire
+    signature_s_max: int = 60  # max HSV saturation (0..255) — "near-white"
+    signature_v_min: int = 170  # min HSV value (0..255) — "bright"
+    # The net only searches near the badge's last-known centre (it roams
+    # smoothly), and only for this many frames after the badge was last seen —
+    # past that the badge has likely moved too far for a local search and the
+    # template bank handles re-acquisition. Keeps the net a precise gap-bridger.
+    signature_max_age: int = 20
     # Removal/fill strategy (see RemovalMode). "reconstruct" is the default,
     # high-quality background rebuild; "blur" smears the badge instead.
     removal: RemovalMode = "reconstruct"
@@ -152,6 +186,16 @@ _BRIGHTNESS_CUTOFF = 225  # white-text/pill detection for the threshold method
 _SEARCH_MULTIPLIERS = (1.0, 0.85, 1.15, 0.7, 1.3)
 _LOG_EVERY = 20  # throttle diagnostics to ~1/sec at 20fps
 _UNLOCK_AFTER_MISSES = 15  # re-open the scale search after this many misses
+
+# Signature net: the badge is a horizontal text band. These bound a candidate
+# component's aspect ratio (w/h) and fill density (white px / bbox area) so the
+# net accepts text-like bands and rejects solid bright blocks (walls, blinds:
+# too dense or wrong aspect) and skin (saturated — vetoed earlier by s_max).
+_SIG_ASPECT_MIN, _SIG_ASPECT_MAX = 2.5, 9.5
+_SIG_DENSITY_MIN, _SIG_DENSITY_MAX = 0.05, 0.80
+# Accept a band whose width is within this factor of the expected badge width
+# for the stream resolution (keeps the net at the badge's size, not arbitrary).
+_SIG_WIDTH_LO, _SIG_WIDTH_HI = 0.5, 1.8
 
 # Default template shipped with the package (a clean crop of the Decart
 # "✦ AI Generated" badge). Lets watermark removal work out of the box without
@@ -188,13 +232,18 @@ class WatermarkRemover:
         # the original here rather than a single pre-scaled copy.
         self._tpl_gray: np.ndarray | None = None
         self._tpl_size: tuple[int, int] | None = None  # (w, h) at authored res
+        # Multi-template bank: the primary plus softened variants, each
+        # (gray, (w,h)) at authored res. templates[0] is always the primary
+        # (mirrors _tpl_gray/_tpl_size). Built by _build_bank().
+        self._templates: list[tuple[np.ndarray, tuple[int, int]]] = []
 
         # Multi-scale state: the content scale that last matched (so steady
         # state searches one scale), a miss counter to re-open the search, and
-        # a cache of resized+edged search templates keyed by target width px.
+        # a cache of resized+edged search templates keyed by (tpl_idx, width px).
         self._locked_scale: float | None = None
+        self._locked_tpl_idx: int | None = None  # which bank template last won
         self._miss_streak = 0
-        self._tpl_cache: dict[int, np.ndarray] = {}
+        self._tpl_cache: dict[tuple[int, int], np.ndarray] = {}
         self._last_conf = 0.0
         self._last_scale = 0.0
         # Track-and-hold: last confident box + how many misses we've coasted.
@@ -202,6 +251,10 @@ class WatermarkRemover:
         self._hold_count = 0
         self._gate_mode = "acquire"  # "acquire" | "maintain" (hysteresis)
         self._last_center: tuple[int, int] | None = None  # for local-search tracking
+        # Signature net: the badge's last-known centre (persists across a lock
+        # release so the net can keep bridging) and frames since last seen.
+        self._sig_center: tuple[int, int] | None = None
+        self._sig_age = 0
         self._prev_bgr: np.ndarray | None = None  # for motion-aware fill
 
         # Temporal recovery state: a per-pixel "clean plate" (most-recent
@@ -223,6 +276,8 @@ class WatermarkRemover:
                     flush=True,
                 )
                 self._method = "threshold"
+            else:
+                self._build_bank()
 
     # ---- construction helpers -------------------------------------------------
 
@@ -240,6 +295,21 @@ class WatermarkRemover:
         h, w = tpl.shape[:2]
         self._tpl_gray = tpl
         self._tpl_size = (w, h)
+
+    def _build_bank(self) -> None:
+        """Assemble the template bank: the primary plus softened (blurred)
+        copies. The badge's appearance varies (background bleed through the
+        translucent pill), so a blur-tolerant variant catches faint frames the
+        sharp primary dips below the gate on — without changing WHAT is matched
+        (same badge, so the same low score on non-badge content)."""
+        if self._tpl_gray is None or self._tpl_size is None:
+            return
+        bank: list[tuple[np.ndarray, tuple[int, int]]] = [(self._tpl_gray, self._tpl_size)]
+        # Odd, increasing kernels; each is a softer rendition of the same badge.
+        for k in (3, 5, 7)[: max(0, self._params.template_variants)]:
+            soft = cv2.GaussianBlur(self._tpl_gray, (k, k), 0)
+            bank.append((soft, self._tpl_size))
+        self._templates = bank
 
     @classmethod
     def from_config(cls, cfg: Config, *, enabled: bool) -> WatermarkRemover | None:
@@ -282,6 +352,7 @@ class WatermarkRemover:
             threshold=cfg.watermark_threshold,
             inpaint_radius=cfg.watermark_inpaint_radius,
             template_ref_width=ref_width,
+            signature_fallback=getattr(cfg, "watermark_signature_fallback", True),
         )
         return cls(params)
 
@@ -319,12 +390,38 @@ class WatermarkRemover:
             gate = self._params.maintain_threshold if tracking else self._params.threshold
             self._gate_mode = "maintain" if tracking else "acquire"
             accepted = box is not None and conf >= gate
+            # Safety net: when template matching won't pass the gate, fall back to
+            # the independent color/shape signature detector — searched LOCALLY,
+            # near where the badge was last seen (it roams smoothly), for a short
+            # window after the last sighting. Strict bands + the local gate mean
+            # it only catches the real (faint) badge, never a far bright look-alike.
+            self._sig_age += 1
+            if (
+                not accepted
+                and self._params.signature_fallback
+                and self._method == "template"
+                and self._sig_center is not None
+                and self._sig_age <= self._params.signature_max_age
+            ):
+                _frame_h, frame_w = gray.shape[:2]
+                radius = max(
+                    40.0,
+                    self._params.track_window_frac * frame_w * (1 + self._sig_age),
+                )
+                sbox, sconf = self._detect_signature(bgr, near=self._sig_center, radius=radius)
+                if sbox is not None and sconf >= self._params.signature_threshold:
+                    box, conf, accepted = sbox, max(conf, gate), True
+                    self._gate_mode = "signature"
             if accepted:
                 self._last_box = box
                 self._held_box = box
                 self._hold_count = 0
                 self._miss_streak = 0
                 self._last_center = (box[0] + box[2] // 2, box[1] + box[3] // 2)
+                # Refresh the signature net's anchor so it keeps tracking the
+                # roaming badge across consecutive misses (and after a release).
+                self._sig_center = self._last_center
+                self._sig_age = 0
             else:
                 self._miss_streak += 1
                 # Coast on the last box through brief dips (track-and-hold).
@@ -338,6 +435,11 @@ class WatermarkRemover:
                     self._hold_count = 0
                     self._last_center = None
                     self._locked_scale = None
+                    self._locked_tpl_idx = None
+            # Drop the signature anchor once the badge hasn't been seen for long
+            # enough that a local search would be guessing.
+            if self._sig_age > self._params.signature_max_age:
+                self._sig_center = None
             self._log_detection(self._held_box, accepted)
 
         box = self._held_box
@@ -404,7 +506,7 @@ class WatermarkRemover:
         return self._detect_template(gray)
 
     def _detect_template(self, gray: np.ndarray) -> tuple[Box | None, float]:
-        if self._tpl_gray is None or self._tpl_size is None:
+        if not self._templates:
             return None, 0.0
 
         _frame_h, frame_w = gray.shape[:2]
@@ -420,31 +522,42 @@ class WatermarkRemover:
         else:
             candidates = tuple(base * m for m in _SEARCH_MULTIPLIERS)
 
-        tpl_w, tpl_h = self._tpl_size
+        # While locked, search ONLY the template that won the lock at the locked
+        # scale (steady-state cost = 1 template x 1 scale). Cold / re-acquire
+        # searches the whole bank x every scale and takes the global best.
+        if self._locked_tpl_idx is not None and self._locked_scale is not None:
+            tpl_indices: tuple[int, ...] = (self._locked_tpl_idx,)
+        else:
+            tpl_indices = tuple(range(len(self._templates)))
+
         best_conf = 0.0
         best_loc: tuple[int, int] | None = None
         best_cs = 0.0
+        best_tpl = 0
         # When tracking, also find the best peak in a window around the badge's
         # last position, so a faint badge isn't lost to a far look-alike.
         tracking = self._locked_scale is not None and self._last_center is not None
         local_conf = 0.0
         local_loc: tuple[int, int] | None = None
         local_cs = 0.0
-        for cs in candidates:
-            # Final search-template size = authored x content-scale x detect-scale.
-            sw = round(tpl_w * cs * ds)
-            sh = round(tpl_h * cs * ds)
-            if sw < 8 or sh < 8 or sh > search.shape[0] or sw > search.shape[1]:
-                continue
-            tpl = self._scaled_template(sw, sh)
-            result = cv2.matchTemplate(search, tpl, cv2.TM_CCOEFF_NORMED)
-            _mn, mx, _ml, ml = cv2.minMaxLoc(result)
-            if mx > best_conf:
-                best_conf, best_loc, best_cs = float(mx), ml, cs
-            if tracking:
-                lc, ll = self._local_peak(result, sw, sh, ds, frame_w)
-                if ll is not None and lc > local_conf:
-                    local_conf, local_loc, local_cs = lc, ll, cs
+        local_tpl = 0
+        for ti in tpl_indices:
+            tpl_w, tpl_h = self._templates[ti][1]
+            for cs in candidates:
+                # Final search-template size = authored x content-scale x detect-scale.
+                sw = round(tpl_w * cs * ds)
+                sh = round(tpl_h * cs * ds)
+                if sw < 8 or sh < 8 or sh > search.shape[0] or sw > search.shape[1]:
+                    continue
+                tpl = self._scaled_template(ti, sw, sh)
+                result = cv2.matchTemplate(search, tpl, cv2.TM_CCOEFF_NORMED)
+                _mn, mx, _ml, ml = cv2.minMaxLoc(result)
+                if mx > best_conf:
+                    best_conf, best_loc, best_cs, best_tpl = float(mx), ml, cs, ti
+                if tracking:
+                    lc, ll = self._local_peak(result, sw, sh, ds, frame_w)
+                    if ll is not None and lc > local_conf:
+                        local_conf, local_loc, local_cs, local_tpl = lc, ll, cs, ti
 
         # While tracking, prefer the local (near-the-badge) peak ONLY when it's
         # a real match — that avoids a far background look-alike. But when the
@@ -460,20 +573,27 @@ class WatermarkRemover:
                 and best_conf > local_conf + 0.10
             )
             if local_conf >= self._params.maintain_threshold and not strong_global:
-                best_conf, best_loc, best_cs = local_conf, local_loc, local_cs
+                best_conf, best_loc, best_cs, best_tpl = (
+                    local_conf,
+                    local_loc,
+                    local_cs,
+                    local_tpl,
+                )
             # else: keep the global peak (re-acquire the jumped badge).
 
         if best_loc is None:
             return None, best_conf
 
         # Return the best candidate regardless of gate — _process applies the
-        # acquire/maintain hysteresis. Lock the scale only on a CONFIDENT
-        # (acquire-level) match: the badge size is constant within a session,
-        # so a marginal match must never shrink/grow the locked box (that was
-        # the 0.70-scale drift that left part of the badge uncovered).
+        # acquire/maintain hysteresis. Lock the scale AND the winning template
+        # only on a CONFIDENT (acquire-level) match: the badge size/appearance is
+        # constant within a session, so a marginal match must never shrink/grow
+        # the locked box (the 0.70-scale drift) or switch templates mid-track.
         if best_conf >= self._params.threshold:
             self._locked_scale = best_cs
+            self._locked_tpl_idx = best_tpl
         self._last_scale = best_cs
+        tpl_w, tpl_h = self._templates[best_tpl][1]
         x = round(best_loc[0] / ds)
         y = round(best_loc[1] / ds)
         w = round(tpl_w * best_cs)
@@ -504,15 +624,17 @@ class WatermarkRemover:
         _mn, mx, _ml, ml = cv2.minMaxLoc(sub)
         return float(mx), (ml[0] + x0, ml[1] + y0)
 
-    def _scaled_template(self, sw: int, sh: int) -> np.ndarray:
-        """Resize (and edge) the full-res template to a search size, cached."""
-        cached = self._tpl_cache.get(sw)
+    def _scaled_template(self, ti: int, sw: int, sh: int) -> np.ndarray:
+        """Resize (and edge) bank template `ti` to a search size, cached by
+        (template index, width)."""
+        key = (ti, sw)
+        cached = self._tpl_cache.get(key)
         if cached is not None and cached.shape[0] == sh:
             return cached
-        assert self._tpl_gray is not None
-        resized = cv2.resize(self._tpl_gray, (sw, sh), interpolation=cv2.INTER_AREA)
+        gray = self._templates[ti][0]
+        resized = cv2.resize(gray, (sw, sh), interpolation=cv2.INTER_AREA)
         tpl = self._isolate(resized) if self._params.text_isolate else resized
-        self._tpl_cache[sw] = tpl
+        self._tpl_cache[key] = tpl
         return tpl
 
     def _detect_threshold(self, gray: np.ndarray) -> tuple[Box | None, float]:
@@ -536,6 +658,89 @@ class WatermarkRemover:
         confidence = bright / box_area
         # Return the best candidate; _process applies the acquire/maintain gate.
         return (bx + rx, by + ry, bw, bh), confidence
+
+    # ---- signature net (color + shape fallback) -------------------------------
+
+    def _expected_badge_w(self, frame_w: int) -> float:
+        """Expected badge width (full-res px) at this stream resolution, from the
+        primary template's authored size scaled by frame_w/ref_width."""
+        if not self._templates:
+            return frame_w * 0.2
+        tpl_w = self._templates[0][1][0]
+        base = frame_w / max(1, self._params.template_ref_width)
+        return tpl_w * base
+
+    def _detect_signature(
+        self,
+        bgr: np.ndarray,
+        near: tuple[int, int] | None = None,
+        radius: float | None = None,
+    ) -> tuple[Box | None, float]:
+        """Fallback used when template matching didn't acquire: find the badge by
+        its signature — a small, horizontal, low-saturation near-white,
+        text-textured band — NEAR its last-known position `near` (within
+        `radius` full-res px). The local gate is essential: real frames have many
+        near-white horizontal bands (collars, teeth, bright strips), so a global
+        search lands on the wrong one (measured 0% on-badge); restricted to the
+        roaming badge's neighbourhood it's precise. Strict aspect/density/size
+        bands plus the near-white veto keep it off skin and solid bright blocks.
+        Returns (full-res box, fit-confidence 0..1) or (None, 0.0)."""
+        ds = self._params.detect_scale
+        small = cv2.resize(bgr, None, fx=ds, fy=ds, interpolation=cv2.INTER_AREA)
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        s = hsv[:, :, 1]
+        v = hsv[:, :, 2]
+        white = ((s < self._params.signature_s_max) & (v > self._params.signature_v_min)).astype(
+            np.uint8
+        ) * 255
+        if int(cv2.countNonZero(white)) == 0:
+            return None, 0.0
+        # Merge text strokes into a horizontal band (wide kernel), then drop
+        # vertical hairlines so tall non-text shapes don't survive.
+        band = cv2.morphologyEx(
+            white, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+        )
+
+        exp_w_ds = self._expected_badge_w(bgr.shape[1]) * ds
+        lo_w, hi_w = exp_w_ds * _SIG_WIDTH_LO, exp_w_ds * _SIG_WIDTH_HI
+        # Local gate: only consider bands near the badge's last-known centre.
+        nx = ny = nr_ds = None
+        if near is not None and radius is not None:
+            nx, ny = near[0] * ds, near[1] * ds
+            nr_ds = radius * ds
+
+        n, _labels, stats, _cent = cv2.connectedComponentsWithStats(band, connectivity=8)
+        best_conf = 0.0
+        best_box: Box | None = None
+        for i in range(1, n):  # skip background label 0
+            x, y, w, h, _area = (int(stats[i, k]) for k in range(5))
+            if w < 8 or h < 4:
+                continue
+            if nx is not None:
+                ccx, ccy = x + w / 2, y + h / 2
+                if ((ccx - nx) ** 2 + (ccy - ny) ** 2) ** 0.5 > nr_ds:
+                    continue  # outside the badge's neighbourhood — skip
+            aspect = w / max(1, h)
+            # Score density from the RAW near-white mask in the band's bbox (not
+            # the morph-closed area): text strokes leave it sparse (~0.3-0.55),
+            # while a solid bright block fills it (~1.0), cleanly separable.
+            raw = int(cv2.countNonZero(white[y : y + h, x : x + w]))
+            density = raw / max(1, w * h)
+            if not (_SIG_ASPECT_MIN <= aspect <= _SIG_ASPECT_MAX):
+                continue
+            if not (_SIG_DENSITY_MIN <= density <= _SIG_DENSITY_MAX):
+                continue
+            if not (lo_w <= w <= hi_w):
+                continue
+            conf = min(
+                _band_score(aspect, _SIG_ASPECT_MIN, _SIG_ASPECT_MAX),
+                _band_score(density, _SIG_DENSITY_MIN, _SIG_DENSITY_MAX),
+                _band_score(w, lo_w, hi_w),
+            )
+            if conf > best_conf:
+                best_conf = conf
+                best_box = (round(x / ds), round(y / ds), round(w / ds), round(h / ds))
+        return best_box, best_conf
 
     # ---- mask + inpaint -------------------------------------------------------
 
@@ -568,11 +773,19 @@ class WatermarkRemover:
 
     def _padded_box(self, shape: tuple[int, int], box: Box) -> tuple[int, int, int, int]:
         """Box grown by footprint_pad_frac (min dilation), clamped to frame —
-        covers the whole pill, not just the matched text strokes."""
+        covers the whole pill, not just the matched text strokes. While coasting
+        (a held box through misses), grows further with `_hold_count` so a badge
+        drifting during the miss stays under cover."""
         h, w = shape
         x, y, bw, bh = box
-        pad_x = max(self._params.dilation, round(self._params.footprint_pad_frac * bw))
-        pad_y = max(self._params.dilation, round(self._params.footprint_pad_frac * bh))
+        pad_frac = self._params.footprint_pad_frac
+        if self._hold_count > 0:
+            pad_frac += min(
+                self._params.coast_expand_max_frac,
+                self._params.coast_expand_frac * self._hold_count,
+            )
+        pad_x = max(self._params.dilation, round(pad_frac * bw))
+        pad_y = max(self._params.dilation, round(pad_frac * bh))
         return (
             max(0, x - pad_x),
             max(0, y - pad_y),
@@ -774,6 +987,21 @@ class WatermarkRemover:
         k = max(3, self._params.tophat_kernel)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         return cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+
+
+def _band_score(x: float, lo: float, hi: float, ramp: float = 0.2) -> float:
+    """Trapezoidal membership 0..1: 1.0 across the central plateau, ramping to 0
+    at the edges lo/hi over `ramp` of the band width. Comfortably-inside values
+    score ~1.0; borderline ones score lower (a soft margin for ranking)."""
+    if x <= lo or x >= hi:
+        return 0.0
+    span = hi - lo
+    edge = span * ramp
+    if x < lo + edge:
+        return (x - lo) / edge
+    if x > hi - edge:
+        return (hi - x) / edge
+    return 1.0
 
 
 def _roi_to_px(roi: tuple[float, float, float, float], h: int, w: int) -> Box:

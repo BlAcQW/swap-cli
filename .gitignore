@@ -60,3 +60,7 @@ recordings/
 
 # Watermark capture source (throwaway; cropped template lives in assets/)
 wm_source.*
+
+# watermark eval harness output (scripts/wm_eval.py)
+*_clean.mp4
+*_annotated.mp4

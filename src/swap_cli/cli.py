@@ -291,6 +291,7 @@ def run(
         watermark_threshold=cfg.watermark_threshold,
         watermark_inpaint_radius=cfg.watermark_inpaint_radius,
         watermark_template_width=cfg.watermark_template_width,
+        watermark_signature_fallback=cfg.watermark_signature_fallback,
     )
 
     _wm_status = "[green]on[/green]" if opts.remove_watermark else "[dim]off[/dim]"

@@ -91,6 +91,8 @@ class RunOptions:
     watermark_threshold: float = 0.50
     watermark_inpaint_radius: int = 3
     watermark_template_width: int | None = None  # capture-frame width (scale center)
+    # Sprint 17: independent color/shape safety net (on by default).
+    watermark_signature_fallback: bool = True
 
 
 async def run_session(opts: RunOptions) -> None:
@@ -395,6 +397,7 @@ def _build_watermark_remover(opts: RunOptions) -> Any:
             threshold=opts.watermark_threshold,
             inpaint_radius=opts.watermark_inpaint_radius,
             template_ref_width=ref_width,
+            signature_fallback=opts.watermark_signature_fallback,
         )
         # Log on SUCCESS — previously silent, which is why a non-matching
         # session showed no `[watermark]` lines at all.

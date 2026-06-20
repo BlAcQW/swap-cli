@@ -178,6 +178,158 @@ def test_threshold_detect_in_roi_keeps_lower_frame_safe() -> None:
     assert by + bh <= FRAME_H * 0.45 + 5
 
 
+# --- multi-template bank (Sprint 17) ---------------------------------------
+
+def test_bank_includes_softened_variants(tmp_path: Path) -> None:
+    """The bank is the primary plus `template_variants` blurred copies, all the
+    same authored size."""
+    rem = _remover(tmp_path, template_variants=2)
+    assert len(rem._templates) == 3
+    assert all(sz == rem._tpl_size for _g, sz in rem._templates)
+    # The variants differ from the primary (they're blurred).
+    assert not np.array_equal(rem._templates[0][0], rem._templates[1][0])
+
+
+def test_bank_disabled_is_single_template(tmp_path: Path) -> None:
+    rem = _remover(tmp_path, template_variants=0)
+    assert len(rem._templates) == 1
+    assert np.array_equal(rem._templates[0][0], rem._tpl_gray)
+
+
+def test_bank_conf_never_below_single(tmp_path: Path) -> None:
+    """Matching against the bank takes the max, so a faint badge can only score
+    >= the single sharp template — never worse. (The real-clip win: the softened
+    variant lifts faint frames the sharp template dips below the gate on.)"""
+    # A faint, slightly-blurred badge — the appearance that sinks the sharp match.
+    tpl = _make_watermark_template()
+    faint = cv2.GaussianBlur(tpl, (5, 5), 0)
+    frame = _stamp(_textured_frame(), faint, 300, 60, alpha=0.45)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    single = _remover(tmp_path, template_variants=0)
+    bank = _remover(tmp_path, template_variants=3)
+    _b1, c_single = single._detect(gray)
+    _b2, c_bank = bank._detect(gray)
+    assert c_bank >= c_single
+
+
+def test_locked_template_index_set_and_reset(tmp_path: Path, monkeypatch) -> None:
+    """A confident acquire locks the winning bank index; full release clears it
+    (so the next cold search re-opens the whole bank)."""
+    rem = _remover(tmp_path, threshold=0.3, hold_frames=2, template_variants=2)
+    frame = _stamp(_textured_frame(), _make_watermark_template(), 300, 60)
+    rem.process(frame)
+    assert rem._locked_tpl_idx is not None  # locked onto whichever variant won
+
+    monkeypatch.setattr(rem, "_detect", lambda _g: (None, 0.0))  # force misses
+    clean = _textured_frame()
+    for _ in range(rem._params.hold_frames + 1):  # exceed hold → release
+        rem.process(clean)
+    assert rem._held_box is None
+    assert rem._locked_tpl_idx is None  # cleared on release
+
+
+# --- signature safety net (Sprint 17) --------------------------------------
+
+def _white_band(frame: np.ndarray, x: int, y: int) -> np.ndarray:
+    """Stamp a bright near-white horizontal text band (the badge signature)."""
+    out = frame.copy()
+    cv2.putText(out, "AI Generated", (x + 6, y + 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (255, 255, 255), 2, cv2.LINE_AA)
+    return out
+
+
+def test_signature_finds_white_text_band(tmp_path: Path) -> None:
+    rem = _remover(tmp_path)  # template_ref_width=FRAME_W, detect_scale=1.0
+    frame = _white_band(_textured_frame(), 280, 60)
+    box, conf = rem._detect_signature(frame)
+    assert box is not None and conf > 0
+    bx, _by, bw, _bh = box
+    assert 240 <= bx <= 320  # near the stamped band
+    assert bw >= 60  # a band, not a speck
+
+
+def test_signature_rejects_saturated_skin(tmp_path: Path) -> None:
+    """A saturated (skin-toned) block must NOT trigger the net — near-white veto."""
+    rem = _remover(tmp_path)
+    frame = _textured_frame()
+    cv2.rectangle(frame, (280, 60), (440, 95), (60, 120, 200), -1)  # warm/saturated
+    box, _conf = rem._detect_signature(frame)
+    assert box is None
+
+
+def test_signature_rejects_solid_bright_block(tmp_path: Path) -> None:
+    """A solid white wall/blind block is too DENSE (≈100% fill) to be text."""
+    rem = _remover(tmp_path)
+    frame = _textured_frame()
+    cv2.rectangle(frame, (280, 60), (440, 95), (255, 255, 255), -1)  # solid fill
+    box, _conf = rem._detect_signature(frame)
+    assert box is None
+
+
+def test_signature_rejects_wrong_aspect(tmp_path: Path) -> None:
+    """A near-square bright blob fails the horizontal-band aspect check."""
+    rem = _remover(tmp_path)
+    frame = _textured_frame()
+    # A small white square with a hole so density is text-like but aspect ~1.
+    cv2.rectangle(frame, (300, 60), (340, 100), (255, 255, 255), 3)
+    box, _conf = rem._detect_signature(frame)
+    assert box is None
+
+
+def test_signature_local_gate_ignores_far_band(tmp_path: Path) -> None:
+    """The net only accepts bands NEAR the anchor — a real badge's neighbourhood.
+    A band far from `near` is skipped (this is what stops it grabbing a collar /
+    bright strip across the frame, the 0%-on-badge global failure)."""
+    rem = _remover(tmp_path)
+    frame = _white_band(_textured_frame(), 480, 60)  # band on the right
+    # Anchor on the LEFT, small radius → the right-side band is out of range.
+    box, _conf = rem._detect_signature(frame, near=(120, 76), radius=80)
+    assert box is None
+    # Anchored ON the band → found.
+    box2, conf2 = rem._detect_signature(frame, near=(540, 76), radius=120)
+    assert box2 is not None and conf2 > 0
+
+
+def test_signature_net_bridges_when_template_misses(tmp_path: Path, monkeypatch) -> None:
+    """Once the badge has been seen (anchor set), the net sustains coverage on a
+    badge the template can no longer find — past the coast window, so this is the
+    net working, not track-and-hold."""
+    rem = _remover(tmp_path, threshold=0.3, signature_fallback=True)
+    rem.process(_stamp(_textured_frame(), _make_watermark_template(), 280, 60))
+    assert rem._sig_center is not None  # anchor primed by the first acquire
+
+    monkeypatch.setattr(rem, "_detect", lambda _g: (None, 0.0))  # template blind
+    frame = _white_band(_textured_frame(), 280, 60)  # badge band still there
+    for _ in range(rem._params.hold_frames + 3):  # outlast coast → only the net holds
+        rem.process(frame)
+    assert rem._held_box is not None
+    assert rem._gate_mode == "signature"
+
+
+def test_signature_net_needs_anchor(tmp_path: Path, monkeypatch) -> None:
+    """Cold (no badge ever seen) → no anchor → the net stays off, so it can't
+    fire on a random bright band before the template has ever locked."""
+    rem = _remover(tmp_path, threshold=0.3, signature_fallback=True)
+    monkeypatch.setattr(rem, "_detect", lambda _g: (None, 0.0))
+    out = rem.process(_white_band(_textured_frame(), 280, 60))
+    assert rem._held_box is None  # no anchor yet → net silent
+    assert np.array_equal(out, _white_band(_textured_frame(), 280, 60))
+
+
+def test_signature_fallback_disabled(tmp_path: Path, monkeypatch) -> None:
+    """With the net off, coverage expires once the coast window ends — nothing
+    bridges the template miss (contrast with the bridge test above)."""
+    rem = _remover(tmp_path, threshold=0.3, signature_fallback=False)
+    rem.process(_stamp(_textured_frame(), _make_watermark_template(), 280, 60))
+    monkeypatch.setattr(rem, "_detect", lambda _g: (None, 0.0))
+    frame = _white_band(_textured_frame(), 280, 60)
+    for _ in range(rem._params.hold_frames + 3):  # outlast coast → release
+        rem.process(frame)
+    assert rem._held_box is None
+    assert rem._gate_mode != "signature"
+
+
 # --- mask + inpaint --------------------------------------------------------
 
 def test_build_mask_shape_and_dilation(tmp_path: Path) -> None:
@@ -370,6 +522,39 @@ def test_footprint_covers_badge_with_margin(tmp_path: Path) -> None:
     # Dilation 8 covers several px outside the raw box on every side.
     assert mask[60, 300 - 6] > 0  # left of the box
     assert mask[60 + WM_H + 6, 300 + WM_W // 2] > 0  # below the box
+
+
+def test_coast_expands_footprint(tmp_path: Path) -> None:
+    """While coasting (held box through misses) the footprint grows with the
+    coast count, so a badge drifting during the miss stays covered."""
+    rem = _remover(tmp_path, footprint_pad_frac=0.30, dilation=8,
+                   coast_expand_frac=0.06, coast_expand_max_frac=0.40)
+    box = (300, 200, 200, 50)
+    rem._hold_count = 0
+    x0a, y0a, x1a, y1a = rem._padded_box((FRAME_H, FRAME_W), box)
+    rem._hold_count = 5  # coasting for 5 frames
+    x0b, y0b, x1b, y1b = rem._padded_box((FRAME_H, FRAME_W), box)
+    # The coasted footprint is strictly larger on every side.
+    assert x0b < x0a and y0b < y0a and x1b > x1a and y1b > y1a
+
+
+def test_coast_expansion_is_capped(tmp_path: Path) -> None:
+    """Coast growth saturates at coast_expand_max_frac — it can't grow forever."""
+    rem = _remover(tmp_path, footprint_pad_frac=0.0, dilation=0,
+                   coast_expand_frac=0.06, coast_expand_max_frac=0.40)
+    box = (300, 200, 200, 50)
+    rem._hold_count = 100  # would be 6.0x without the cap
+    x0, _y0, x1, _y1 = rem._padded_box((FRAME_H, FRAME_W), box)
+    pad_x = round(0.40 * 200)  # capped fraction
+    assert (x1 - x0) == 200 + 2 * pad_x
+
+
+def test_default_hold_frames_is_short(tmp_path: Path) -> None:
+    """Coast is kept short on purpose: the badge can jump anywhere at any time,
+    so a long hold would cover a stale spot while the real badge shows elsewhere.
+    The bank + signature net provide coverage, not a long coast."""
+    rem = _remover(tmp_path)
+    assert rem._params.hold_frames == 5
 
 
 def test_padded_box_extends_beyond_match(tmp_path: Path) -> None:

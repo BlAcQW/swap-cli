@@ -64,6 +64,7 @@ def test_watermark_fields_round_trip() -> None:
         watermark_threshold=0.7,
         watermark_inpaint_radius=5,
         watermark_template_width=1088,
+        watermark_signature_fallback=False,
     )
     cfg = config.load()
     assert cfg.remove_watermark is True
@@ -73,6 +74,7 @@ def test_watermark_fields_round_trip() -> None:
     assert cfg.watermark_threshold == 0.7
     assert cfg.watermark_inpaint_radius == 5
     assert cfg.watermark_template_width == 1088
+    assert cfg.watermark_signature_fallback is False
 
 
 def test_watermark_defaults_when_absent() -> None:
@@ -86,6 +88,7 @@ def test_watermark_defaults_when_absent() -> None:
     assert cfg.watermark_threshold == 0.50
     assert cfg.watermark_inpaint_radius == 3
     assert cfg.watermark_template_width is None
+    assert cfg.watermark_signature_fallback is True  # on by default
 
 
 def test_machine_id_is_stable_and_hex_32() -> None:

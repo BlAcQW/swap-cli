@@ -55,6 +55,10 @@ class Config:
     # resolution varies, so this centers the multi-scale match exactly for a
     # user-captured template. None → the 1280px bundled-default assumption.
     watermark_template_width: int | None = None
+    # Sprint 17: independent color/shape safety net that catches faint badges
+    # template matching misses. On by default (bullet-proofing); flip off if it
+    # ever covers a non-badge region.
+    watermark_signature_fallback: bool = True
 
     @property
     def is_complete(self) -> bool:
@@ -96,6 +100,7 @@ def load() -> Config:
         watermark_threshold=_float_or_none(data.get("watermark_threshold")) or 0.50,
         watermark_inpaint_radius=_int_or_none(data.get("watermark_inpaint_radius")) or 3,
         watermark_template_width=_int_or_none(data.get("watermark_template_width")),
+        watermark_signature_fallback=bool(data.get("watermark_signature_fallback", True)),
     )
 
 
@@ -139,6 +144,8 @@ def save(cfg: Config) -> Path:
         body.append(f"watermark_inpaint_radius = {cfg.watermark_inpaint_radius}")
     if cfg.watermark_template_width is not None:
         body.append(f"watermark_template_width = {cfg.watermark_template_width}")
+    if not cfg.watermark_signature_fallback:  # only persist the non-default (off)
+        body.append("watermark_signature_fallback = false")
 
     text = "\n".join(body) + "\n"
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -175,6 +182,9 @@ def update(**kwargs: Any) -> Config:
         ),
         watermark_template_width=kwargs.get(
             "watermark_template_width", current.watermark_template_width
+        ),
+        watermark_signature_fallback=kwargs.get(
+            "watermark_signature_fallback", current.watermark_signature_fallback
         ),
     )
     save(merged)
