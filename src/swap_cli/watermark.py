@@ -232,10 +232,13 @@ class WatermarkRemover:
         # the original here rather than a single pre-scaled copy.
         self._tpl_gray: np.ndarray | None = None
         self._tpl_size: tuple[int, int] | None = None  # (w, h) at authored res
-        # Multi-template bank: the primary plus softened variants, each
-        # (gray, (w,h)) at authored res. templates[0] is always the primary
-        # (mirrors _tpl_gray/_tpl_size). Built by _build_bank().
-        self._templates: list[tuple[np.ndarray, tuple[int, int]]] = []
+        # Multi-template bank: the primary capture plus the bundled default
+        # backstop, each with softened variants. Entries are
+        # (gray, (w,h), ref_width) at authored res — ref_width per entry because
+        # a custom capture and the bundled default were authored at different
+        # frame widths. templates[0] is always the primary (mirrors
+        # _tpl_gray/_tpl_size). Built by _build_bank().
+        self._templates: list[tuple[np.ndarray, tuple[int, int], int]] = []
 
         # Multi-scale state: the content scale that last matched (so steady
         # state searches one scale), a miss counter to re-open the search, and
@@ -297,18 +300,43 @@ class WatermarkRemover:
         self._tpl_size = (w, h)
 
     def _build_bank(self) -> None:
-        """Assemble the template bank: the primary plus softened (blurred)
-        copies. The badge's appearance varies (background bleed through the
-        translucent pill), so a blur-tolerant variant catches faint frames the
-        sharp primary dips below the gate on — without changing WHAT is matched
-        (same badge, so the same low score on non-badge content)."""
+        """Assemble the template bank.
+
+        Two things make the bank robust:
+        - Softened (blurred) copies of each source: the badge's appearance varies
+          (background bleeds through the translucent pill), so a blur-tolerant
+          variant catches faint frames the sharp source dips below the gate on —
+          without changing WHAT is matched.
+        - The BUNDLED default is always kept as a backstop alongside a user's
+          custom capture. A loose/over-padded capture can score worse than the
+          clean bundled crop; keeping both (best score per frame) means a poor
+          capture can never *lower* coverage — the bundled template carries it.
+        Each entry carries its own ref_width (custom = capture width, bundled =
+        BUNDLED_TEMPLATE_REF_WIDTH) since matchTemplate is not scale-invariant.
+        """
         if self._tpl_gray is None or self._tpl_size is None:
             return
-        bank: list[tuple[np.ndarray, tuple[int, int]]] = [(self._tpl_gray, self._tpl_size)]
-        # Odd, increasing kernels; each is a softer rendition of the same badge.
-        for k in (3, 5, 7)[: max(0, self._params.template_variants)]:
-            soft = cv2.GaussianBlur(self._tpl_gray, (k, k), 0)
-            bank.append((soft, self._tpl_size))
+        # (gray, size, ref_width) sources, before blur variants are added.
+        sources: list[tuple[np.ndarray, tuple[int, int], int]] = [
+            (self._tpl_gray, self._tpl_size, self._params.template_ref_width)
+        ]
+        # If the primary is a CUSTOM capture, also load the bundled default as a
+        # known-good backstop (skip if the primary already IS the bundled).
+        bundled = bundled_template_path()
+        primary = self._params.template_path
+        if bundled is not None and (primary is None or Path(primary) != bundled):
+            b = cv2.imread(str(bundled), cv2.IMREAD_GRAYSCALE)
+            if b is not None and b.size > 0:
+                bh, bw = b.shape[:2]
+                sources.append((b, (bw, bh), BUNDLED_TEMPLATE_REF_WIDTH))
+                print("[watermark] bank: custom capture + bundled default backstop", flush=True)
+
+        bank: list[tuple[np.ndarray, tuple[int, int], int]] = []
+        for gray, size, ref in sources:
+            bank.append((gray, size, ref))
+            # Odd, increasing kernels; each is a softer rendition of the source.
+            for k in (3, 5, 7)[: max(0, self._params.template_variants)]:
+                bank.append((cv2.GaussianBlur(gray, (k, k), 0), size, ref))
         self._templates = bank
 
     @classmethod
@@ -515,13 +543,6 @@ class WatermarkRemover:
         small = self._scale(gray)
         search = self._isolate(small) if self._params.text_isolate else small
 
-        # Center the search on the badge's expected size for this resolution.
-        base = frame_w / max(1, self._params.template_ref_width)
-        if self._locked_scale is not None:
-            candidates = (self._locked_scale,)
-        else:
-            candidates = tuple(base * m for m in _SEARCH_MULTIPLIERS)
-
         # While locked, search ONLY the template that won the lock at the locked
         # scale (steady-state cost = 1 template x 1 scale). Cold / re-acquire
         # searches the whole bank x every scale and takes the global best.
@@ -543,6 +564,14 @@ class WatermarkRemover:
         local_tpl = 0
         for ti in tpl_indices:
             tpl_w, tpl_h = self._templates[ti][1]
+            # Center the search on this template's expected size for the frame —
+            # per-template because the bundled backstop and a custom capture were
+            # authored at different frame widths.
+            if self._locked_scale is not None:
+                candidates: tuple[float, ...] = (self._locked_scale,)
+            else:
+                base = frame_w / max(1, self._templates[ti][2])
+                candidates = tuple(base * m for m in _SEARCH_MULTIPLIERS)
             for cs in candidates:
                 # Final search-template size = authored x content-scale x detect-scale.
                 sw = round(tpl_w * cs * ds)

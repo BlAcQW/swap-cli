@@ -180,20 +180,81 @@ def test_threshold_detect_in_roi_keeps_lower_frame_safe() -> None:
 
 # --- multi-template bank (Sprint 17) ---------------------------------------
 
-def test_bank_includes_softened_variants(tmp_path: Path) -> None:
-    """The bank is the primary plus `template_variants` blurred copies, all the
-    same authored size."""
-    rem = _remover(tmp_path, template_variants=2)
-    assert len(rem._templates) == 3
-    assert all(sz == rem._tpl_size for _g, sz in rem._templates)
+def test_bank_includes_softened_variants() -> None:
+    """The bank is each source plus `template_variants` blurred copies. Using the
+    bundled template as primary isolates the variant logic (no extra backstop)."""
+    import swap_cli.watermark as wm
+
+    rem = WatermarkRemover(
+        WatermarkParams(template_path=wm.bundled_template_path(), template_variants=2,
+                        template_ref_width=BUNDLED_TEMPLATE_REF_WIDTH)
+    )
+    assert len(rem._templates) == 3  # primary + 2 variants (primary IS bundled → no backstop)
+    assert all(sz == rem._tpl_size for _g, sz, _r in rem._templates)
     # The variants differ from the primary (they're blurred).
     assert not np.array_equal(rem._templates[0][0], rem._templates[1][0])
 
 
-def test_bank_disabled_is_single_template(tmp_path: Path) -> None:
-    rem = _remover(tmp_path, template_variants=0)
+def test_bank_disabled_is_single_template() -> None:
+    import swap_cli.watermark as wm
+
+    rem = WatermarkRemover(
+        WatermarkParams(template_path=wm.bundled_template_path(), template_variants=0,
+                        template_ref_width=BUNDLED_TEMPLATE_REF_WIDTH)
+    )
     assert len(rem._templates) == 1
     assert np.array_equal(rem._templates[0][0], rem._tpl_gray)
+
+
+def test_bank_keeps_bundled_backstop_for_custom_template(tmp_path: Path) -> None:
+    """A custom capture must NOT drop the known-good bundled default: the bank
+    keeps both sources so a poor capture can't tank detection. Each source
+    carries its own ref width (custom = capture width, bundled = 954)."""
+    rem = _remover(tmp_path, template_variants=0, template_ref_width=640)
+    # Two sources (custom + bundled), no blur variants.
+    assert len(rem._templates) == 2
+    refs = {r for _g, _s, r in rem._templates}
+    assert refs == {640, BUNDLED_TEMPLATE_REF_WIDTH}  # each at its own ref width
+    # Primary (custom) is first; bundled is the backstop.
+    assert rem._templates[0][2] == 640
+
+
+def test_bundled_primary_not_double_loaded() -> None:
+    """When the primary IS the bundled default, it isn't added a second time."""
+    import swap_cli.watermark as wm
+
+    rem = WatermarkRemover(
+        WatermarkParams(template_path=wm.bundled_template_path(), template_variants=0,
+                        template_ref_width=BUNDLED_TEMPLATE_REF_WIDTH)
+    )
+    assert len(rem._templates) == 1
+
+
+def test_bundled_backstop_detects_when_custom_useless(tmp_path: Path) -> None:
+    """The real failure mode: a poor custom capture can't find the badge, but the
+    bundled backstop in the bank still does. (User's live bug — a bad capture had
+    overridden the good bundled default.)"""
+    import swap_cli.watermark as wm
+
+    # A useless custom template: random noise that won't match the real badge.
+    bad = tmp_path / "bad.png"
+    cv2.imwrite(str(bad), np.random.RandomState(1).randint(0, 255, (46, 208, 3), np.uint8))
+
+    # A frame with the REAL bundled badge stamped in, at the bundled ref width.
+    badge = cv2.imread(str(wm.bundled_template_path()))
+    th, tw = badge.shape[:2]
+    frame = np.full((568, BUNDLED_TEMPLATE_REF_WIDTH, 3), 60, np.uint8)
+    x, y = 300, 120
+    frame[y : y + th, x : x + tw] = badge
+
+    rem = WatermarkRemover(
+        WatermarkParams(template_path=bad, template_variants=2,
+                        template_ref_width=BUNDLED_TEMPLATE_REF_WIDTH)
+    )
+    box, conf = rem._detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    assert box is not None
+    assert conf >= rem._params.threshold  # caught by the bundled backstop
+    assert abs(box[0] - x) <= 10 and abs(box[1] - y) <= 10
 
 
 def test_bank_conf_never_below_single(tmp_path: Path) -> None:
