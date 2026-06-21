@@ -21,7 +21,7 @@ swap gui          # OR  swap run -r face.jpg
 |---|---|---|
 | A laptop with a webcam | Your own | — |
 | Python 3.11+ | [python.org](https://python.org) / Homebrew | Free |
-| **swap-cli license key** | Bought at [swap.ikieguy.online](https://swap.ikieguy.online) | One-time fee |
+| **swap-cli license key** | Bought at [swap.storelygh.com](https://swap.storelygh.com) | One-time fee |
 | **Decart API key** | [platform.decart.ai](https://platform.decart.ai) | Free credits → ~$0.01/sec after |
 
 ---
@@ -84,7 +84,7 @@ $ swap doctor
                  swap-cli doctor
  license key set         ✓
  decart api key set      ✓
- dns swap.ikieguy.online  ✓
+ dns swap.storelygh.com  ✓
  dns api.decart.ai        ✓
  license validate         ✓ ok
  camera probe             ✓
@@ -349,7 +349,7 @@ Your machine ID stays stable so you don't burn a slot on the seat cap.
 ## Privacy
 
 - Your **Decart API key** never leaves your machine.
-- License validation pings `swap.ikieguy.online` once per launch with
+- License validation pings `swap.storelygh.com` once per launch with
   a hashed machine ID. No camera frames, no IP geolocation, no analytics.
 - Generated frames stay on your machine unless you opt in to recording.
 
@@ -358,7 +358,7 @@ Your machine ID stays stable so you don't burn a slot on the seat cap.
 ## License
 
 Commercial. See [LICENSE.md](LICENSE.md). Buy a license key at
-[swap.ikieguy.online](https://swap.ikieguy.online).
+[swap.storelygh.com](https://swap.storelygh.com).
 
 ---
 

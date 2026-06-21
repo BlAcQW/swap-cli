@@ -8,6 +8,7 @@ import socket
 import sys
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
@@ -259,7 +260,7 @@ def run(
         if not status.valid:
             err_console.print(
                 f"[red]License invalid ({status.reason}). "
-                "Buy or renew at https://swap.ikieguy.online[/red]"
+                "Buy or renew at https://swap.storelygh.com[/red]"
             )
             raise typer.Exit(3)
         if status.cached:
@@ -1155,7 +1156,8 @@ async def _doctor() -> None:
         table.add_row("decart api key set", "[red]✗ run `swap setup`[/red]")
 
     # Network — just DNS for the two endpoints we'll hit
-    for host in ("swap.ikieguy.online", "api.decart.ai"):
+    backend_host = urlparse(license.BACKEND_URL).hostname or "swap.storelygh.com"
+    for host in (backend_host, "api.decart.ai"):
         try:
             await asyncio.to_thread(socket.gethostbyname, host)
             table.add_row(f"dns {host}", "[green]✓[/green]")

@@ -8,7 +8,7 @@ agree to the terms below.
 ## 1. Grant
 
 Subject to a valid license key purchased through an authorized distribution
-channel (e.g. swap.ikieguy.online), the licensee is granted a non-exclusive,
+channel (e.g. swap.storelygh.com), the licensee is granted a non-exclusive,
 non-transferable right to install and use this software on their personal
 machines for the duration of the license term.
 
@@ -39,7 +39,7 @@ preset library.
 
 ## 4. License Verification
 
-The software contacts `https://swap.ikieguy.online/api/cli/license/validate`
+The software contacts `https://swap.storelygh.com/api/cli/license/validate`
 on launch to verify the license key. A valid 24-hour offline grace period is
 cached locally. License keys may be revoked by the licensor in cases of
 abuse, chargeback, or violation of these terms.

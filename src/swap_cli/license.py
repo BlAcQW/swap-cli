@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 
@@ -9,7 +10,11 @@ import httpx
 
 from . import config
 
-LICENSE_VALIDATE_URL = "https://swap.ikieguy.online/api/cli/license/validate"
+# Backend base URL. Defaults to production; override with SWAP_BACKEND_URL so a
+# future domain change needs no re-release (e.g. SWAP_BACKEND_URL=https://swap.example.com).
+DEFAULT_BACKEND_URL = "https://swap.storelygh.com"
+BACKEND_URL = os.environ.get("SWAP_BACKEND_URL", DEFAULT_BACKEND_URL).rstrip("/")
+LICENSE_VALIDATE_URL = f"{BACKEND_URL}/api/cli/license/validate"
 OFFLINE_GRACE_SECONDS = 24 * 60 * 60
 
 

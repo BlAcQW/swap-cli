@@ -810,7 +810,7 @@ class SwapGUI(ctk.CTk):
                 self.after(
                     0,
                     lambda: self._status_var.set(
-                        f"License invalid ({status.reason}) — buy at swap.ikieguy.online"
+                        f"License invalid ({status.reason}) — buy at swap.storelygh.com"
                     ),
                 )
         except Exception:
@@ -1631,7 +1631,7 @@ class _SettingsModal(ctk.CTkToplevel):
         ).pack(fill="x", padx=14, pady=(2, 4))
         ctk.CTkLabel(
             license_frame,
-            text="Bought from swap.ikieguy.online — rotate by contacting support.",
+            text="Bought from swap.storelygh.com — rotate by contacting support.",
             font=ctk.CTkFont(size=10),
             text_color="#6b7280",
             anchor="w",
