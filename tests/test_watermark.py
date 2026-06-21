@@ -149,10 +149,10 @@ def test_scale_lock_after_match(tmp_path: Path) -> None:
     rem = _remover(tmp_path, threshold=0.3)
     frame = _stamp(_textured_frame(), _make_watermark_template(), 300, 60)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    assert rem._locked_scale is None
+    assert rem._locked_w is None
     box, _conf = rem._detect(gray)
     assert box is not None
-    assert rem._locked_scale is not None  # winning scale cached for steady state
+    assert rem._locked_w is not None  # winning badge width cached for steady state
 
 
 def test_template_gate_rejects_absent_watermark(tmp_path: Path) -> None:
@@ -257,6 +257,21 @@ def test_bundled_backstop_detects_when_custom_useless(tmp_path: Path) -> None:
     assert abs(box[0] - x) <= 10 and abs(box[1] - y) <= 10
 
 
+def test_corrupt_custom_falls_back_to_bundled_not_threshold(tmp_path: Path) -> None:
+    """A corrupt/unreadable custom template must fall back to the bundled default
+    (template method), NOT silently degrade to the brightness threshold method
+    (which would explain a badge that suddenly shows in every frame)."""
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"this is not a valid PNG file")
+    rem = WatermarkRemover(
+        WatermarkParams(template_path=corrupt, template_variants=0, template_ref_width=1088)
+    )
+    assert rem._method == "template"  # did NOT fall back to brightness threshold
+    assert rem._templates  # bundled default loaded despite the corrupt custom
+    refs = {r for _g, _s, r in rem._templates}
+    assert BUNDLED_TEMPLATE_REF_WIDTH in refs
+
+
 def test_bank_conf_never_below_single(tmp_path: Path) -> None:
     """Matching against the bank takes the max, so a faint badge can only score
     >= the single sharp template — never worse. (The real-clip win: the softened
@@ -274,20 +289,38 @@ def test_bank_conf_never_below_single(tmp_path: Path) -> None:
     assert c_bank >= c_single
 
 
-def test_locked_template_index_set_and_reset(tmp_path: Path, monkeypatch) -> None:
-    """A confident acquire locks the winning bank index; full release clears it
-    (so the next cold search re-opens the whole bank)."""
+def test_locked_width_set_and_reset(tmp_path: Path, monkeypatch) -> None:
+    """A confident acquire locks the badge's physical width; full release clears
+    it (so the next cold search re-opens the multi-scale search). The lock is a
+    SIZE, not a template — every bank template still competes each frame."""
     rem = _remover(tmp_path, threshold=0.3, hold_frames=2, template_variants=2)
     frame = _stamp(_textured_frame(), _make_watermark_template(), 300, 60)
     rem.process(frame)
-    assert rem._locked_tpl_idx is not None  # locked onto whichever variant won
+    assert rem._locked_w is not None  # locked the badge width
 
     monkeypatch.setattr(rem, "_detect", lambda _g: (None, 0.0))  # force misses
     clean = _textured_frame()
     for _ in range(rem._params.hold_frames + 1):  # exceed hold → release
         rem.process(clean)
     assert rem._held_box is None
-    assert rem._locked_tpl_idx is None  # cleared on release
+    assert rem._locked_w is None  # cleared on release
+
+
+def test_bank_competes_while_locked_no_monopoly(tmp_path: Path) -> None:
+    """Regression for the live bug: a bad template that locks must NOT starve the
+    rest of the bank. The lock is a SIZE (`_locked_w`), not a single template
+    index — so every bank template still competes each frame and a stronger match
+    (e.g. the bundled backstop) can re-take the lock. The old per-template lock
+    (`_locked_tpl_idx`) that caused the monopoly is gone."""
+    rem = _remover(tmp_path, threshold=0.3, template_variants=2)
+    assert not hasattr(rem, "_locked_tpl_idx")  # monopoly mechanism removed
+    frame = _stamp(_textured_frame(), _make_watermark_template(), 300, 60)
+    box1, _c1 = rem._detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))  # acquire
+    assert rem._locked_w is not None and box1 is not None
+    # Still tracks the badge on the next frame with the full bank in play.
+    rem._last_center = (box1[0] + box1[2] // 2, box1[1] + box1[3] // 2)
+    box2, _c2 = rem._detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    assert box2 is not None
 
 
 # --- signature safety net (Sprint 17) --------------------------------------
@@ -796,16 +829,16 @@ def test_blur_mode_sets_fill_label_via_process(tmp_path: Path) -> None:
 
 
 def test_scale_locks_only_on_confident_match(tmp_path: Path) -> None:
-    """A marginal match must not change the locked scale (the 0.70 drift that
-    left the badge undersized); only a confident (>= acquire) match locks it."""
+    """A marginal match must not lock the badge width (the 0.70 drift that left
+    the badge undersized); only a confident (>= acquire) match locks it."""
     rem = _remover(tmp_path, threshold=0.5)
-    # Clean frame → best conf below the acquire gate → no scale lock.
+    # Clean frame → best conf below the acquire gate → no width lock.
     rem._detect(cv2.cvtColor(_textured_frame(), cv2.COLOR_BGR2GRAY))
-    assert rem._locked_scale is None
-    # Badge frame → confident → scale locks.
+    assert rem._locked_w is None
+    # Badge frame → confident → width locks.
     frame = _stamp(_textured_frame(), _make_watermark_template(), 200, 60)
     _box, conf = rem._detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-    assert conf >= 0.5 and rem._locked_scale is not None
+    assert conf >= 0.5 and rem._locked_w is not None
 
 
 def test_scale_persists_through_coast_resets_on_release(
@@ -815,16 +848,16 @@ def test_scale_persists_through_coast_resets_on_release(
     box = (300, 60, WM_W, WM_H)
     monkeypatch.setattr(rem, "_detect", lambda _g: (box, 0.8))  # acquire
     rem.process(_textured_frame())
-    rem._locked_scale = 1.0  # a locked size
+    rem._locked_w = float(WM_W)  # a locked badge width
 
     monkeypatch.setattr(rem, "_detect", lambda _g: (box, 0.1))  # misses (coast)
-    for _ in range(3):  # within hold → scale must persist
+    for _ in range(3):  # within hold → width must persist
         rem.process(_textured_frame())
         assert rem._held_box is not None
-        assert rem._locked_scale == 1.0
+        assert rem._locked_w == float(WM_W)
     rem.process(_textured_frame())  # exceed hold → full release
     assert rem._held_box is None
-    assert rem._locked_scale is None  # only now re-open the scale search
+    assert rem._locked_w is None  # only now re-open the multi-scale search
 
 
 def test_capture_autotighten_shrinks_loose_box() -> None:
