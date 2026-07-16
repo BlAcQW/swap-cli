@@ -64,3 +64,5 @@ wm_source.*
 # watermark eval harness output (scripts/wm_eval.py)
 *_clean.mp4
 *_annotated.mp4
+# probe output from scripts/fal_probe.py
+probe_out/

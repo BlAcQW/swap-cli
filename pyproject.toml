@@ -49,6 +49,11 @@ dependencies = [
     # for browsers, but Python/OpenSSL doesn't) → CERTIFICATE_VERIFY_FAILED.
     # We load this on top of the OS store so the Decart connection verifies.
     "certifi>=2024.2",
+    # Alternate realtime backend (--provider fal). fal.ai resells the same Decart
+    # Lucy realtime model on its own account. Small (httpx/websockets/msgpack) and
+    # httpx is already a dep, so it's cheap enough to ship in the base install
+    # rather than gate the provider behind an extra.
+    "fal-client>=0.5",
     "aiortc>=1.9",
     "av>=11.0",
     "opencv-python>=4.10",

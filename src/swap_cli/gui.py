@@ -260,6 +260,37 @@ class SwapGUI(ctk.CTk):
         ).pack(anchor="w", pady=(2, 0))
         self._sync_watermark_options()  # hide the picker if removal starts off
 
+        # Provider selector (Sprint 18). Decart is the default (WebRTC). fal.ai
+        # resells the SAME Lucy model over a websocket on fal's own Decart
+        # account — so it's a second source, and possibly a way around the
+        # "AI Generated" badge Decart refuses to lift for us. Read at start-time
+        # like the other options: switch it before clicking Live.
+        provider_row = ctk.CTkFrame(outer, fg_color="transparent")
+        provider_row.pack(fill="x", pady=(14, 0))
+        ctk.CTkLabel(
+            provider_row, text="Provider", anchor="w", font=ctk.CTkFont(size=11)
+        ).pack(anchor="w")
+        self._provider_var = tk.StringVar(
+            value="Fal" if (_wm_cfg.provider or "decart") == "fal" else "Decart"
+        )
+        ctk.CTkSegmentedButton(
+            provider_row,
+            values=["Decart", "Fal"],
+            variable=self._provider_var,
+            command=lambda _v=None: self._on_provider_change(),
+        ).pack(anchor="w", fill="x", pady=(2, 0))
+        self._provider_hint = ctk.CTkLabel(
+            provider_row,
+            text="",
+            anchor="w",
+            font=ctk.CTkFont(size=10),
+            text_color="#6b7280",
+            wraplength=460,
+            justify="left",
+        )
+        self._provider_hint.pack(anchor="w", pady=(2, 0))
+        self._on_provider_change(persist=False)  # seed the hint
+
         # Model selector. Decart fixes width/height/fps per model — we display
         # the native dimensions next to each option so the user knows what
         # they're getting. There is no orientation knob: the SDK only accepts
@@ -601,6 +632,33 @@ class SwapGUI(ctk.CTk):
         v = self._tier_var.get()
         return v.split()[0] if v else "lucy-2"
 
+    def _selected_provider(self) -> str:
+        return "fal" if self._provider_var.get().strip().lower() == "fal" else "decart"
+
+    def _on_provider_change(self, persist: bool = True) -> None:
+        """Explain the tradeoff and persist the choice so it survives a restart.
+        Takes effect on the next Live click (options are read at start-time)."""
+        provider = self._selected_provider()
+        cfg = config.load()
+        if provider == "fal":
+            if cfg.fal_api_key:
+                hint = (
+                    "fal.ai runs the same Lucy model on fal's account, billed "
+                    "per second. Switch takes effect next time you go Live."
+                )
+            else:
+                hint = (
+                    "⚠ No fal API key yet — add one in ⚙ Settings "
+                    "(get it at fal.ai/dashboard/keys), or Live will fail."
+                )
+        else:
+            hint = "Decart — the default realtime path (WebRTC)."
+        if getattr(self, "_provider_hint", None) is not None:
+            self._provider_hint.configure(text=hint)
+        if persist and provider != (cfg.provider or "decart"):
+            with suppress(Exception):
+                config.update(provider=provider)
+
     def _sync_watermark_options(self) -> None:
         """Show the removal-style picker only when watermark removal is on —
         there's nothing to configure when it's off."""
@@ -731,6 +789,8 @@ class SwapGUI(ctk.CTk):
             watermark_inpaint_radius=cfg.watermark_inpaint_radius,
             watermark_template_width=cfg.watermark_template_width,
             watermark_signature_fallback=cfg.watermark_signature_fallback,
+            provider=self._selected_provider(),
+            fal_api_key=cfg.fal_api_key or "",
         )
 
         # Persist the voice id so next launch defaults to it.
@@ -1700,6 +1760,46 @@ class _SettingsModal(ctk.CTkToplevel):
         )
         self._error_label.pack(fill="x", padx=14, pady=(0, 4))
 
+        # ── fal.ai key (optional) ──────────────────────────────────────
+        # Only needed when Provider is switched to Fal. Kept deliberately simpler
+        # than the Decart row (no redact/edit dance): it's optional, and a user
+        # who's here is pasting a fresh key rather than auditing a live one.
+        fal_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
+        fal_frame.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(
+            fal_frame,
+            text="fal.ai API key (optional)",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#9ca3af",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(10, 0))
+        ctk.CTkLabel(
+            fal_frame,
+            text="Only needed if you set Provider to Fal. Get one at "
+            "fal.ai/dashboard/keys — billed per second, no subscription.",
+            font=ctk.CTkFont(size=10),
+            text_color="#6b7280",
+            anchor="w",
+            wraplength=420,
+            justify="left",
+        ).pack(fill="x", padx=14, pady=(0, 4))
+        self._fal_var = tk.StringVar(value=cfg.fal_api_key or "")
+        ctk.CTkEntry(
+            fal_frame,
+            textvariable=self._fal_var,
+            show="•",
+            placeholder_text="fal_sk_…",
+        ).pack(fill="x", padx=14, pady=(2, 4))
+        fal_row = ctk.CTkFrame(fal_frame, fg_color="transparent")
+        fal_row.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkButton(
+            fal_row, text="Save", width=80, command=self._on_save_fal
+        ).pack(side="left")
+        self._fal_status = ctk.CTkLabel(
+            fal_row, text="", anchor="w", font=ctk.CTkFont(size=11)
+        )
+        self._fal_status.pack(side="left", padx=(8, 0))
+
         # ── Config file path ───────────────────────────────────────────
         path_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
         path_frame.pack(fill="x", pady=(0, 12))
@@ -1770,6 +1870,19 @@ class _SettingsModal(ctk.CTkToplevel):
         self._edit_btn.pack(side="left")
         self._show_btn.pack(side="left", padx=(8, 0))
         self._error_label.configure(text="")
+
+    def _on_save_fal(self) -> None:
+        """Persist (or clear) the fal key. Optional — an empty box just means the
+        Fal provider stays unavailable, which the Provider hint already warns."""
+        key = (self._fal_var.get() or "").strip()
+        try:
+            config.update(fal_api_key=key or None)
+        except Exception as err:  # noqa: BLE001 — surface, never crash the modal
+            self._fal_status.configure(text=f"Save failed: {err}", text_color="#ef4444")
+            return
+        self._fal_status.configure(
+            text="Saved ✓" if key else "Cleared", text_color="#22c55e"
+        )
 
     def _on_save(self) -> None:
         try:

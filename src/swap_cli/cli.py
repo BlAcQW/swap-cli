@@ -178,6 +178,17 @@ def run(
             help="Decart realtime model identifier.",
         ),
     ] = "lucy-2",
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help=(
+                "Realtime backend: 'decart' (default) or 'fal' (the same Lucy "
+                "model resold by fal.ai — needs a fal key). Omit to use your "
+                "saved preference."
+            ),
+        ),
+    ] = None,
     device: Annotated[
         int,
         typer.Option(
@@ -293,6 +304,8 @@ def run(
         watermark_inpaint_radius=cfg.watermark_inpaint_radius,
         watermark_template_width=cfg.watermark_template_width,
         watermark_signature_fallback=cfg.watermark_signature_fallback,
+        provider=(provider or cfg.provider),
+        fal_api_key=cfg.fal_api_key or "",
     )
 
     _wm_status = "[green]on[/green]" if opts.remove_watermark else "[dim]off[/dim]"

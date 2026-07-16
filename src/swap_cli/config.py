@@ -59,6 +59,11 @@ class Config:
     # template matching misses. On by default (bullet-proofing); flip off if it
     # ever covers a non-badge region.
     watermark_signature_fallback: bool = True
+    # Sprint 18: realtime backend — "decart" (default) or "fal". fal resells the
+    # same Decart Lucy model on its own account, so it's both a second source and
+    # a possible way around Decart's watermark (which they refuse to lift for us).
+    provider: str = "decart"
+    fal_api_key: str | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -101,6 +106,8 @@ def load() -> Config:
         watermark_inpaint_radius=_int_or_none(data.get("watermark_inpaint_radius")) or 3,
         watermark_template_width=_int_or_none(data.get("watermark_template_width")),
         watermark_signature_fallback=bool(data.get("watermark_signature_fallback", True)),
+        provider=_clean(data.get("provider")) or "decart",
+        fal_api_key=_clean(data.get("fal_api_key")),
     )
 
 
@@ -146,6 +153,10 @@ def save(cfg: Config) -> Path:
         body.append(f"watermark_template_width = {cfg.watermark_template_width}")
     if not cfg.watermark_signature_fallback:  # only persist the non-default (off)
         body.append("watermark_signature_fallback = false")
+    if cfg.provider and cfg.provider != "decart":
+        body.append(f'provider = "{_escape(cfg.provider)}"')
+    if cfg.fal_api_key:
+        body.append(f'fal_api_key = "{_escape(cfg.fal_api_key)}"')
 
     text = "\n".join(body) + "\n"
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -186,6 +197,8 @@ def update(**kwargs: Any) -> Config:
         watermark_signature_fallback=kwargs.get(
             "watermark_signature_fallback", current.watermark_signature_fallback
         ),
+        provider=kwargs.get("provider", current.provider),
+        fal_api_key=kwargs.get("fal_api_key", current.fal_api_key),
     )
     save(merged)
     return merged

@@ -14,12 +14,9 @@ from typing import Any, Callable
 from .camera import CameraTrack
 from .display import Display, default_recording_path
 
-# Sprint 14m: bumped from 20 → 45 s. WebRTC cold-reconnects (user clicks
-# Stop then Live again) routinely take 25–35 s because the OS hasn't yet
-# released the previous session's UDP bindings; Decart's server may also
-# rate-limit rapid reconnect. 45 s covers the common case without making
-# a genuine hang feel infinite.
-CONNECT_TIMEOUT_S = 45.0
+# Decart's connect timeout now lives with the Decart provider. Re-exported here
+# because it's part of this module's public surface (and guarded by a test).
+from .providers.decart import CONNECT_TIMEOUT_S  # noqa: F401
 
 
 def _is_harmless_ice_noise(context: dict) -> bool:
@@ -93,6 +90,11 @@ class RunOptions:
     watermark_template_width: int | None = None  # capture-frame width (scale center)
     # Sprint 17: independent color/shape safety net (on by default).
     watermark_signature_fallback: bool = True
+    # Sprint 18: which realtime backend runs the swap. "decart" (default, WebRTC)
+    # or "fal" (the same Lucy model resold by fal.ai, over a websocket). fal is a
+    # separate Decart account, so its watermark policy may differ.
+    provider: str = "decart"
+    fal_api_key: str = ""
 
 
 async def run_session(opts: RunOptions) -> None:
@@ -123,47 +125,23 @@ async def run_session(opts: RunOptions) -> None:
     except Exception as err:  # fall back to default certs; never block a session
         print(f"[runtime] TLS: cert setup skipped ({err}); using defaults", flush=True)
 
-    # decart 0.1.0 rewrote the realtime client onto LiveKit and expects a
-    # LiveKit-native track; we feed it an aiortc CameraTrack, which fails with a
-    # cryptic "'CameraTrack' object has no attribute '_ffi_handle'" retry loop.
-    # Fail fast with the exact fix instead. (pyproject pins decart<0.1, but an
-    # already-installed 0.1.x won't be downgraded by a code update alone.)
-    from importlib.metadata import PackageNotFoundError
-    from importlib.metadata import version as _pkg_version
+    # Pick the backend. Everything below is provider-agnostic — the provider owns
+    # connecting, applying the reference identity, and its own teardown. The
+    # decart>=0.1 (LiveKit) guard now lives in providers/decart.py.
+    from .providers import get_provider
 
-    try:
-        _dv = _pkg_version("decart")
-        _dv_mm = tuple(int(p) for p in _dv.split(".")[:2])
-    except (PackageNotFoundError, ValueError):
-        _dv, _dv_mm = "", ()
-    if _dv_mm >= (0, 1):
-        raise RuntimeError(
-            f"decart {_dv} uses the new LiveKit API, which swap-cli doesn't support "
-            'yet. Run:  pip install "decart==0.0.40"   then relaunch.'
-        )
+    provider = get_provider(getattr(opts, "provider", "decart"))
+    print(f"[runtime] provider={provider.name}", flush=True)
 
-    # Lazy import — `decart` and `aiortc` pull in heavy native deps and we
-    # don't want them loaded for `swap version` / `swap config` / etc.
-    from decart import DecartClient, models  # type: ignore[import-not-found]
-    from decart.realtime import (  # type: ignore[import-not-found]
-        RealtimeClient,
-        RealtimeConnectOptions,
-    )
-    from decart.types import ModelState, Prompt  # type: ignore[import-not-found]
-
-    print("[runtime] imports ok", flush=True)
-    model = models.realtime(opts.model_name)
-    print(f"[runtime] model={opts.model_name} {model.width}x{model.height}@{model.fps}fps", flush=True)
-
+    spec = provider.frame_spec(opts)
     camera = CameraTrack(
         device=opts.camera_device,
-        width=int(model.width),
-        height=int(model.height),
-        fps=int(model.fps),
+        width=spec.width,
+        height=spec.height,
+        fps=spec.fps,
     )
     print(f"[runtime] camera opened on device {opts.camera_device}", flush=True)
 
-    client = DecartClient(api_key=opts.decart_api_key)
     quit_event = asyncio.Event()
     notify = opts.on_status_change
 
@@ -194,69 +172,25 @@ async def run_session(opts: RunOptions) -> None:
 
         opts.on_runtime_ready(_request_stop)
 
-    realtime_client: Any = None
+    session: Any = None
     display: Display | None = None
     try:
-        print("[runtime] about to call RealtimeClient.connect", flush=True)
-        notify("Negotiating Decart session…")
-        try:
-            realtime_client = await asyncio.wait_for(
-                RealtimeClient.connect(
-                    base_url=client.base_url,
-                    api_key=client.api_key,
-                    local_track=camera,
-                    options=RealtimeConnectOptions(
-                        model=model,
-                        on_remote_stream=lambda remote_track: _on_remote_stream(
-                            remote_track,
-                            record=opts.record,
-                            quit_event=quit_event,
-                            display_box=display_box,
-                            virtual_camera=opts.virtual_camera,
-                            watermark=_build_watermark_remover(opts),
-                            show_window=opts.show_preview_window,
-                            on_display_ready=opts.on_display_ready,
-                        ),
-                        initial_state=ModelState(
-                            prompt=Prompt(text=opts.prompt, enhance=True),
-                        ),
-                    ),
-                ),
-                timeout=CONNECT_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError as exc:
-            raise RuntimeError(
-                f"Decart connection timed out after {CONNECT_TIMEOUT_S:.0f}s.\n"
-                "Common causes:\n"
-                "  • You just ended a previous session — wait 15s before "
-                "retrying so Decart frees the WebRTC port.\n"
-                "  • Firewall blocking UDP — Decart's realtime API needs "
-                "UDP traversal for WebRTC ICE.\n"
-                "  • Decart API key invalid or revoked — verify it in the "
-                "⚙ Settings panel."
-            ) from exc
-
-        def _on_connection_change(state: str) -> None:
-            print(f"[runtime] connection: {state}")
-            notify(f"Connection: {state}")
-            if state == "disconnected":
-                quit_event.set()
-
-        def _on_error(error: Any) -> None:
-            msg = getattr(error, "message", str(error))
-            print(f"[runtime] error: {msg}")
-            notify(f"Error: {msg}")
-            quit_event.set()
-
-        def _on_tick(message: Any) -> None:
-            seconds = getattr(message, "seconds", 0)
-            # carriage return so we update in-place
-            print(f"\rstreaming · {seconds}s", end="", flush=True)
-            notify(f"Live · {seconds}s")
-
-        realtime_client.on("connection_change", _on_connection_change)
-        realtime_client.on("error", _on_error)
-        realtime_client.on("generation_tick", _on_tick)
+        session = await provider.connect(
+            camera=camera,
+            opts=opts,
+            on_remote_stream=lambda remote_track: _on_remote_stream(
+                remote_track,
+                record=opts.record,
+                quit_event=quit_event,
+                display_box=display_box,
+                virtual_camera=opts.virtual_camera,
+                watermark=_build_watermark_remover(opts),
+                show_window=opts.show_preview_window,
+                on_display_ready=opts.on_display_ready,
+            ),
+            notify=notify,
+            quit_event=quit_event,
+        )
 
         # Apply the reference identity (URL or local file path; bytes also OK).
         # If the connection drops mid-send, the SDK surfaces a "Image send timed
@@ -265,9 +199,7 @@ async def run_session(opts: RunOptions) -> None:
         if opts.reference:
             notify("Applying reference identity…")
             try:
-                await realtime_client.set(
-                    _build_set_input(opts.prompt, opts.reference),
-                )
+                await session.set_identity(opts.prompt, opts.reference)
             except asyncio.CancelledError:
                 raise  # genuine cancellation → GUI handles it gracefully
             except Exception as exc:  # a drop mid-send must not crash the session
@@ -297,15 +229,13 @@ async def run_session(opts: RunOptions) -> None:
         if voice_track is not None:
             with suppress(Exception, asyncio.CancelledError):
                 await voice_track.stop()
-        if realtime_client is not None:
+        if session is not None:
             with suppress(Exception, asyncio.CancelledError):
-                await realtime_client.disconnect()
+                await session.disconnect()
         # Display is started inside `_on_remote_stream` and stored in display_box[0].
         if display_box and display_box[0] is not None:
             with suppress(Exception, asyncio.CancelledError):
                 await display_box[0].stop()
-        with suppress(Exception, asyncio.CancelledError):
-            await client.close()
         camera.stop()
 
 
@@ -445,15 +375,3 @@ def _on_remote_stream(
             on_display_ready(disp)
 
 
-def _build_set_input(prompt: str, reference: str) -> Any:
-    """Build a `SetInput` accepting either a URL string or a local file path."""
-    from decart import SetInput  # type: ignore[import-not-found]
-
-    p = Path(reference)
-    image: Any
-    if p.exists() and p.is_file():
-        image = p.read_bytes()
-    else:
-        image = reference  # treat as URL
-
-    return SetInput(prompt=prompt, image=image, enhance=True)
