@@ -234,6 +234,41 @@ async def test_fal_track_roundtrips_over_websocket() -> None:
     assert out.pts == 7
 
 
+async def test_fal_track_decodes_json_string_frames() -> None:
+    """fal replies with BOTH binary (msgpack) and text (JSON) frames — a JSON
+    string result must decode, and a JSON-string control frame must be skipped."""
+    import base64
+    import json
+
+    from swap_cli.providers import fal as falmod
+
+    swapped = np.full((16, 32, 3), 90, np.uint8)
+    ok, buf = cv2.imencode(".jpg", swapped)
+    assert ok
+    data_uri = "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()
+
+    class _FakeCamera:
+        async def recv(self):
+            return av.VideoFrame.from_ndarray(np.zeros((16, 32, 3), np.uint8), format="bgr24")
+
+    class _FakeWS:
+        def __init__(self):
+            self._replies = [
+                json.dumps({"type": "x-fal-message"}),  # string control → skipped
+                json.dumps({"image": data_uri}),  # string result → decoded
+            ]
+
+        async def send(self, data):
+            return None
+
+        async def recv(self):
+            return self._replies.pop(0)
+
+    track = falmod.FalTrack(_FakeCamera(), _FakeWS(), {"prompt": "x"})
+    out = await track.recv()
+    assert out.to_ndarray(format="bgr24").shape == (16, 32, 3)
+
+
 async def test_fal_track_raises_when_closed() -> None:
     from swap_cli.providers.fal import FalTrack
 

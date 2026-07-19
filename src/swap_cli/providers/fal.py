@@ -231,9 +231,18 @@ class FalTrack:
         )
 
         # Read until an actual result (skip keepalive/timeout control frames).
+        # fal sends BOTH binary (msgpack) and text (JSON) frames — mirror its own
+        # decoder: string → JSON, bytes → msgpack.
         while True:
             raw = await self._ws.recv()
-            msg = msgpack.unpackb(raw, raw=False) if isinstance(raw, (bytes, bytearray)) else raw
+            if isinstance(raw, (bytes, bytearray)):
+                msg = msgpack.unpackb(raw, raw=False)
+            elif isinstance(raw, str):
+                import json
+
+                msg = json.loads(raw)
+            else:
+                msg = raw
             if not self._logged_first:
                 self._logged_first = True
                 keys = sorted(msg) if isinstance(msg, dict) else type(msg).__name__
