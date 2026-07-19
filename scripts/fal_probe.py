@@ -76,39 +76,48 @@ async def main() -> int:
         return 1
 
     reference = _encode_reference(args.reference)
-    print(f"app={FAL_REALTIME_APP}\nprompt={args.prompt!r}\nsending {args.frames} frames…")
+    # Use the QUEUE (subscribe) path, not the realtime websocket. The realtime
+    # video transport is WebRTC (which fal's Python client doesn't expose), so
+    # the websocket returns "Error while forwarding the request". subscribe takes
+    # the SAME {prompt, image_url, reference_image_url} and returns a real
+    # transformed frame — seconds per frame (too slow for live), but that's fine:
+    # the probe only needs to answer "is there a badge?" and "does it swap the
+    # face?". If the answer is yes, THEN the live WebRTC transport is worth building.
+    print(f"app={FAL_REALTIME_APP} (queue/subscribe)\nprompt={args.prompt!r}")
+    print(f"processing {args.frames} frames — a few seconds each…")
 
     sent = 0
-    async with fal_client.realtime_async(FAL_REALTIME_APP) as conn:
-        while sent < args.frames:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            await conn.send(
-                {
+    while sent < args.frames:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        try:
+            result = await fal_client.subscribe_async(
+                FAL_REALTIME_APP,
+                arguments={
                     "prompt": args.prompt,
                     "image_url": _encode_frame_jpeg(frame),
                     "reference_image_url": reference,
-                }
+                },
             )
-            result = await conn.recv()
-            if result is None:
-                print("connection closed by fal")
-                break
-            if sent == 0:  # dump the raw reply once — reveals the payload shape
-                keys = sorted(result)
-                print(f"first reply keys: {keys}")
-                (outdir / "first_reply_keys.txt").write_text(repr(keys))
-            try:
-                out = _decode_result(result)
-            except Exception as err:  # noqa: BLE001 — probe: show, don't crash
-                print(f"decode failed: {err}")
-                (outdir / "raw_reply.txt").write_text(repr(result)[:4000])
-                break
-            cv2.imwrite(str(outdir / f"in_{sent:03d}.png"), frame)
-            cv2.imwrite(str(outdir / f"out_{sent:03d}.png"), out)
-            sent += 1
-            print(f"\r  {sent}/{args.frames}", end="", flush=True)
+        except Exception as err:
+            print(f"\nfal call failed: {err}")
+            (outdir / "call_error.txt").write_text(repr(err)[:4000])
+            break
+        if sent == 0:  # dump the raw reply once — reveals the payload shape
+            keys = sorted(result) if isinstance(result, dict) else type(result).__name__
+            print(f"first reply keys: {keys}")
+            (outdir / "first_reply_keys.txt").write_text(repr(keys))
+        try:
+            out = _decode_result(result)
+        except Exception as err:
+            print(f"decode failed: {err}")
+            (outdir / "raw_reply.txt").write_text(repr(result)[:4000])
+            break
+        cv2.imwrite(str(outdir / f"in_{sent:03d}.png"), frame)
+        cv2.imwrite(str(outdir / f"out_{sent:03d}.png"), out)
+        sent += 1
+        print(f"\r  {sent}/{args.frames}", end="", flush=True)
     cap.release()
 
     print(f"\n\nwrote {sent} in_/out_ pairs to {outdir}/")
