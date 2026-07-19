@@ -34,8 +34,8 @@ for your license key).
 
 | Backend | Where to get the key | Cost | Watermark |
 |---|---|---|---|
-| **fal.ai** *(recommended)* | [fal.ai/dashboard/keys](https://fal.ai/dashboard/keys) | ~$0.02/sec, pay as you go | **None** |
-| Decart | [platform.decart.ai](https://platform.decart.ai) | Free credits → ~$0.02/sec | Adds an "✦ AI Generated" badge |
+| **fal.ai** *(recommended)* | [fal.ai/dashboard/keys](https://fal.ai/dashboard/keys) | **$0.04/sec**, pay as you go | **None** |
+| Decart | [platform.decart.ai](https://platform.decart.ai) | Free credits → **$0.02/sec** | Adds an "✦ AI Generated" badge |
 
 > Decart stamps its badge at the account level and won't lift it on request.
 > swap-cli can remove it per frame (`Remove watermark` in the GUI), but fal's
@@ -283,12 +283,23 @@ Instagram, upload anywhere.
 
 We bill once for the license. Compute is on your own fal.ai or Decart account.
 
-| Decart pricing tier (your account) | Cost / sec | 5 min session | 1 hour session |
-|---|---|---|---|
-| Lucy Fast | ~$0.01 | $3 | $36 |
-| Lucy Pro  | ~$0.05 | $15 | $180 |
+| Backend (your account) | Model | Cost / sec | 5 min | 1 hour |
+|---|---|---|---|---|
+| **fal.ai** | Lucy 2.5 realtime | $0.04 | $12 | $144 |
+| **Decart** | Lucy 2 realtime | $0.02 | $6 | $72 |
 
-Your Decart dashboard shows the running tally. We're never in that loop.
+**Badge-free costs double.** fal charges $0.04/sec for Lucy 2.5 — the model that
+does identity swap — while Decart bills $0.02/sec direct but stamps its
+"✦ AI Generated" badge on every frame.
+
+fal does list a $0.02/sec Lucy 2 endpoint, but it's `lucy2-vton` — the virtual
+**try-on** model. It swaps clothing, not faces, so it can't do swap-cli's job.
+There is no cheaper badge-free option today.
+
+If cost matters more than the badge, run Decart and turn on `Remove watermark`
+in the GUI. If the badge matters more than cost, run fal.
+
+Your fal/Decart dashboard shows the running tally. We're never in that loop.
 
 ---
 
