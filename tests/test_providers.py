@@ -106,6 +106,15 @@ def test_fal_decode_result_reports_missing_image() -> None:
         _decode_result({"unexpected": 1})
 
 
+def test_fal_decode_result_surfaces_error_text() -> None:
+    """fal signals a rejected request with an `error` field — the actual text
+    must reach the user, not a generic 'no image' message."""
+    from swap_cli.providers.fal import _decode_result
+
+    with pytest.raises(RuntimeError, match="fal rejected the request.*bad reference"):
+        _decode_result({"error": "bad reference", "detail": "unsupported format"})
+
+
 async def test_fal_track_roundtrips_camera_frame_through_websocket() -> None:
     """The adapter is what lets Display treat fal like a Decart remote track:
     pull a camera frame → send to fal → return the transformed frame."""

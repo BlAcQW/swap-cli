@@ -83,6 +83,17 @@ def _decode_result(result: dict[str, Any]) -> Any:
     import cv2
     import numpy as np
 
+    # fal signals a rejected request with an `error` field instead of an image —
+    # surface its actual text so the cause is diagnosable, not just "no image".
+    if "error" in result and not any(
+        k in result for k in ("image", "images", "output", "frame")
+    ):
+        detail = result.get("error")
+        for extra in ("detail", "message", "reason"):
+            if extra in result:
+                detail = f"{detail} · {extra}={result[extra]!r}"
+        raise RuntimeError(f"fal rejected the request: {detail!r}")
+
     payload: Any = None
     for key in ("image", "images", "image_url", "output", "frame"):
         if key in result:
