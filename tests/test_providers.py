@@ -111,65 +111,112 @@ def test_fal_decode_result_surfaces_error_text() -> None:
     must reach the user, not a generic 'no image' message."""
     from swap_cli.providers.fal import _decode_result
 
-    with pytest.raises(RuntimeError, match="fal rejected the request.*bad reference"):
+    with pytest.raises(RuntimeError, match=r"fal rejected the request.*bad reference"):
         _decode_result({"error": "bad reference", "detail": "unsupported format"})
 
 
-async def test_fal_track_roundtrips_camera_frame_through_websocket() -> None:
-    """The adapter is what lets Display treat fal like a Decart remote track:
-    pull a camera frame → send to fal → return the transformed frame."""
-    from swap_cli.providers.fal import FalTrack, _encode_frame_jpeg
+# --- fal WebRTC (WMA bridge) signaling seams --------------------------------
 
-    swapped = np.full((16, 32, 3), 180, np.uint8)
+def test_bridge_headers_carry_the_key() -> None:
+    from swap_cli.providers.fal import _bridge_headers
 
-    from fractions import Fraction
-
-    class _FakeCamera:
-        async def recv(self):
-            f = av.VideoFrame.from_ndarray(np.zeros((16, 32, 3), np.uint8), format="bgr24")
-            f.pts, f.time_base = 7, Fraction(1, 20)
-            return f
-
-    sent: list[dict] = []
-
-    class _FakeConn:
-        async def send(self, payload):
-            sent.append(payload)
-
-        async def recv(self):
-            return {"image": _encode_frame_jpeg(swapped)}
-
-    state = {"prompt": "swap me", "reference_image_url": "data:image/jpeg;base64,AAA"}
-    track = FalTrack(_FakeCamera(), _FakeConn(), state)
-    out = await track.recv()
-
-    # Sent the frame + prompt + the identity reference.
-    assert sent[0]["image_url"].startswith("data:image/jpeg;base64,")
-    assert sent[0]["prompt"] == "swap me"
-    assert sent[0]["reference_image_url"] == state["reference_image_url"]
-    # Got the transformed frame back, timing preserved.
-    assert out.to_ndarray(format="bgr24").shape == (16, 32, 3)
-    assert out.pts == 7
+    h = _bridge_headers("fal_sk_abc")
+    assert h["Authorization"] == "Key fal_sk_abc"
+    assert h["Content-Type"] == "application/json"
 
 
-async def test_fal_track_raises_when_connection_closes() -> None:
-    """recv() -> None means fal hung up; surface it rather than loop on None."""
-    from swap_cli.providers.fal import FalTrack
+def test_data_channel_payload_is_prompt_plus_reference() -> None:
+    """Frames flow over the media track now, so the data channel carries only the
+    prompt and (encoded) reference identity — NOT per-frame image_url."""
+    import json
 
-    class _FakeCamera:
-        async def recv(self):
-            return av.VideoFrame.from_ndarray(np.zeros((8, 8, 3), np.uint8), format="bgr24")
+    from swap_cli.providers.fal import _data_channel_payload
 
-    class _ClosedConn:
-        async def send(self, payload):
-            return None
+    msg = json.loads(_data_channel_payload("swap me", None))
+    assert msg == {"prompt": "swap me"}  # no reference → no key, no image_url
+    assert "image_url" not in msg
 
-        async def recv(self):
-            return None
 
-    track = FalTrack(_FakeCamera(), _ClosedConn(), {"prompt": ""})
-    with pytest.raises(RuntimeError, match="closed"):
-        await track.recv()
+def test_data_channel_payload_encodes_reference_url() -> None:
+    import json
+
+    from swap_cli.providers.fal import _data_channel_payload
+
+    msg = json.loads(_data_channel_payload("p", "https://example.com/face.png"))
+    assert msg["reference_image_url"] == "https://example.com/face.png"
+
+
+async def test_post_offer_builds_the_request(monkeypatch) -> None:
+    """The offer POST must hit the bridge with app_id + type:offer + auth."""
+    import httpx
+
+    from swap_cli.providers import fal as falmod
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"session_id": "s1", "sdp": "ANSWER", "type": "answer"}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured.update(url=url, headers=headers, json=json)
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    answer = await falmod._post_offer("decart/lucy2-vton/realtime", "OFFERSDP", "fal_sk_k")
+
+    assert captured["url"].endswith("/session")
+    assert captured["json"] == {
+        "app_id": "decart/lucy2-vton/realtime",
+        "sdp": "OFFERSDP",
+        "type": "offer",
+    }
+    assert captured["headers"]["Authorization"] == "Key fal_sk_k"
+    assert answer["session_id"] == "s1" and answer["sdp"] == "ANSWER"
+
+
+async def test_post_offer_raises_actionably_on_non_2xx(monkeypatch) -> None:
+    """A bridge rejection answers 'is this model reachable from Python' — the
+    error must say so, with the app_id and status, not a generic failure."""
+    import httpx
+
+    from swap_cli.providers import fal as falmod
+
+    class _Resp:
+        status_code = 404
+        text = "not found"
+
+        def json(self):
+            return {}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    with pytest.raises(RuntimeError, match=r"WMA bridge rejected.*404.*non-browser"):
+        await falmod._post_offer("decart/lucy2-vton/realtime", "SDP", "k")
 
 
 # --- config plumbing --------------------------------------------------------

@@ -5,22 +5,28 @@ fal resells the identical Lucy realtime model (`decart/lucy2-vton/realtime`) at
 the same $0.02/sec pay-as-you-go, on fal's own Decart account — so its watermark
 policy may differ. Same model = same quality; only the transport changes.
 
-Transport difference (the whole reason this file exists):
-  Decart  → WebRTC. You hand the SDK a local track, it hands back a remote track.
-  fal     → a websocket where you send ONE FRAME per message (base64 data URI)
-            and read the transformed frame back. No media track at all.
+Transport: fal's realtime VIDEO path is **WebRTC** (its "World Model Accelerator"
+bridge), NOT per-frame msgpack — sending frames over the plain websocket returns
+"Error while forwarding the request". So this is a real WebRTC client:
 
-So we wrap the websocket in `FalTrack`, which exposes the same `async recv()`
-contract `Display` expects. Everything downstream (watermark removal, virtual
-camera, recording, preview) is then completely unaware of which provider is live.
+  1. aiortc RTCPeerConnection, add the webcam track, open a data channel.
+  2. Create the offer; aiortc gathers all ICE candidates into the SDP (the bridge
+     does NOT support trickle ICE).
+  3. POST the offer + app_id to https://wma.fal.run/session → get the SDP answer.
+  4. The transformed video comes back as a WebRTC REMOTE TRACK — handed to the
+     exact same `on_remote_stream` callback Decart uses, so Display (watermark
+     removal, OBS virtual camera, recording, preview) is unchanged.
+  5. Prompt + reference image go over the data channel; heartbeat keeps it alive.
 
-Caveat worth knowing: fal's only realtime Lucy endpoint is VTON-branded, but its
-schema documents `reference_image_url` as a *character reference*, which is what
-we need for identity substitution. Verify with `scripts/fal_probe.py`.
+Two things are unconfirmed until this runs live (documented in the plan): whether
+the marketplace model is reachable via the WMA bridge from a non-browser client,
+and the exact data-channel message schema. Both fail loud.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,6 +38,14 @@ if TYPE_CHECKING:
 
 # fal's only realtime Lucy endpoint (both fal.ai/lucy-2 and /lucy-2.1 point here).
 FAL_REALTIME_APP = "decart/lucy2-vton/realtime"
+
+# fal's WebRTC signaling bridge (World Model Accelerator). POST an SDP offer +
+# app_id, get an SDP answer; heartbeat keeps the session alive.
+WMA_BRIDGE_URL = "https://wma.fal.run"
+HEARTBEAT_INTERVAL_S = 5.0
+# Public STUN so the offer carries reachable candidates. Strict-NAT users may
+# need TURN; the bridge answer can also advertise ICE servers we could adopt.
+_STUN_URL = "stun:stun.l.google.com:19302"
 
 # fal gives no model-geometry endpoint, so we pick the capture size ourselves.
 # Matches what Decart negotiates for lucy-2 so switching providers doesn't change
@@ -120,87 +134,85 @@ def _decode_result(result: dict[str, Any]) -> Any:
     return frame
 
 
-class FalTrack:
-    """Track-like adapter: pulls a camera frame, round-trips it through fal, and
-    returns the transformed frame — so `Display` can treat fal exactly like a
-    Decart remote track.
+def _bridge_headers(key: str) -> dict[str, str]:
+    return {"Authorization": f"Key {key}", "Content-Type": "application/json"}
 
-    Deliberately serial (send → recv per frame): the model is stateful per
-    connection and out-of-order frames would jitter the identity. That makes the
-    round-trip latency the frame budget, which is the known tradeoff vs Decart's
-    WebRTC path.
-    """
 
-    kind = "video"
+def _data_channel_payload(prompt: str, reference: str | None) -> str:
+    """The message we send over the data channel to steer the model. Frames now
+    flow over the media track, so this carries only prompt + reference identity.
+    Schema is fal's undocumented VTON input minus image_url; iterate if needed."""
+    msg: dict[str, Any] = {"prompt": prompt or ""}
+    if reference:
+        msg["reference_image_url"] = _encode_reference(reference)
+    return json.dumps(msg)
 
-    def __init__(self, camera: Any, connection: Any, state: dict[str, Any]) -> None:
-        self._camera = camera
-        self._conn = connection
-        self._state = state  # {"prompt": str, "reference_image_url": str | None}
-        self._closed = False
 
-    async def recv(self) -> Any:
-        import av
+async def _post_offer(app_id: str, offer_sdp: str, key: str) -> dict[str, Any]:
+    """POST the SDP offer to the WMA bridge, return the answer JSON. Non-2xx is
+    the answer to 'is this marketplace model reachable from a non-browser client'
+    — surface it loudly rather than as a generic connection failure."""
+    import httpx
 
-        if self._closed:
-            raise RuntimeError("fal track closed")
-        frame = await self._camera.recv()
-        bgr = frame.to_ndarray(format="bgr24")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{WMA_BRIDGE_URL}/session",
+            headers=_bridge_headers(key),
+            json={"app_id": app_id, "sdp": offer_sdp, "type": "offer"},
+        )
+    if resp.status_code >= 300:
+        raise RuntimeError(
+            f"fal WMA bridge rejected app_id {app_id!r} (HTTP {resp.status_code}): "
+            f"{resp.text[:300]!r} — this marketplace model may not be reachable "
+            "from a non-browser client."
+        )
+    return resp.json()
 
-        payload: dict[str, Any] = {
-            "prompt": self._state.get("prompt", ""),
-            "image_url": _encode_frame_jpeg(bgr),
-        }
-        ref = self._state.get("reference_image_url")
-        if ref:
-            payload["reference_image_url"] = ref
 
-        await self._conn.send(payload)
-        result = await self._conn.recv()
-        if result is None:
-            raise RuntimeError("fal connection closed")
+async def _heartbeat(session_id: str, key: str, stop: asyncio.Event) -> None:
+    """Keep the WMA session alive until stop is set (every HEARTBEAT_INTERVAL_S)."""
+    import httpx
 
-        out = av.VideoFrame.from_ndarray(_decode_result(result), format="bgr24")
-        # Preserve timing so downstream recording/vcam pace correctly. Guard the
-        # copies: av rejects a None time_base, and not every source sets one.
-        if frame.pts is not None:
-            out.pts = frame.pts
-        if frame.time_base is not None:
-            out.time_base = frame.time_base
-        return out
-
-    def stop(self) -> None:
-        self._closed = True
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while not stop.is_set():
+            with suppress(Exception):
+                await client.post(
+                    f"{WMA_BRIDGE_URL}/session/heartbeat",
+                    headers=_bridge_headers(key),
+                    json={"session_id": session_id},
+                )
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_S)
 
 
 class _FalSession:
-    def __init__(self, ctx: Any, connection: Any, state: dict[str, Any], track: FalTrack) -> None:
-        self._ctx = ctx
-        self._conn = connection
-        self._state = state
-        self._track = track
+    def __init__(self, pc: Any, channel: Any, hb: Any, stop: asyncio.Event) -> None:
+        self._pc = pc
+        self._channel = channel
+        self._hb = hb
+        self._stop = stop
 
     async def set_identity(self, prompt: str, reference: str) -> None:
-        # fal has no separate "set" call — the reference rides with every frame,
-        # so we just update the state the track sends.
-        if prompt:
-            self._state["prompt"] = prompt
-        if reference:
-            self._state["reference_image_url"] = _encode_reference(reference)
+        with suppress(Exception):
+            if getattr(self._channel, "readyState", None) == "open":
+                self._channel.send(_data_channel_payload(prompt, reference))
 
     async def disconnect(self) -> None:
         # Teardown must never raise — the caller is already in a finally block.
-        self._track.stop()
-        with suppress(Exception):
-            await self._conn.close()
-        with suppress(Exception):
-            await self._ctx.__aexit__(None, None, None)
+        self._stop.set()
+        if self._hb is not None:
+            self._hb.cancel()
+            with suppress(Exception, asyncio.CancelledError):
+                await self._hb
+        with suppress(Exception, asyncio.CancelledError):
+            await self._pc.close()
 
 
 class FalProvider:
-    """Runs the Lucy realtime model on fal instead of Decart."""
+    """Runs the Lucy realtime model on fal instead of Decart, over WebRTC."""
 
     name = "fal"
+    app_id = FAL_REALTIME_APP
 
     def frame_spec(self, opts: Any) -> FrameSpec:
         return DEFAULT_FRAME_SPEC
@@ -224,26 +236,59 @@ class FalProvider:
                 "run `swap setup` (or set it in ⚙ Settings)."
             )
 
-        try:
-            import fal_client
-        except ImportError as err:  # pragma: no cover - depends on install extras
-            raise RuntimeError(
-                "The fal provider needs the fal client. Run:  pip install fal-client"
-            ) from err
-        # fal_client reads the key from the environment.
-        import os
-
-        os.environ["FAL_KEY"] = key
+        from aiortc import (  # type: ignore[import-not-found]
+            RTCConfiguration,
+            RTCIceServer,
+            RTCPeerConnection,
+            RTCSessionDescription,
+        )
 
         notify("Negotiating fal session…")
-        state: dict[str, Any] = {"prompt": opts.prompt, "reference_image_url": None}
-        ctx = fal_client.realtime_async(FAL_REALTIME_APP)
-        connection = await ctx.__aenter__()
-        print(f"[runtime] fal realtime connected · {FAL_REALTIME_APP}", flush=True)
+        pc = RTCPeerConnection(
+            RTCConfiguration(iceServers=[RTCIceServer(urls=_STUN_URL)])
+        )
+        pc.addTrack(camera)  # webcam → fal
+        channel = pc.createDataChannel("input")
 
-        track = FalTrack(camera, connection, state)
-        session = _FalSession(ctx, connection, state, track)
-        # No callback to wait on: fal has no remote track, so hand our adapter
-        # straight to the same consumer the Decart path uses.
-        on_remote_stream(track)
-        return session
+        @channel.on("open")
+        def _on_open() -> None:  # send prompt + reference once the channel is up
+            with suppress(Exception):
+                channel.send(_data_channel_payload(opts.prompt, opts.reference))
+                print("[runtime] fal: sent prompt/reference on data channel", flush=True)
+
+        @pc.on("track")
+        def _on_track(track: Any) -> None:
+            # fal's transformed video → hand to the SAME consumer Decart uses, so
+            # watermark removal / OBS vcam / recording / preview are untouched.
+            if track.kind == "video":
+                print("[runtime] fal: remote video track received", flush=True)
+                on_remote_stream(track)
+
+        @pc.on("connectionstatechange")
+        async def _on_state() -> None:
+            st = pc.connectionState
+            print(f"[runtime] fal connection: {st}", flush=True)
+            notify(f"Connection: {st}")
+            if st in ("failed", "closed", "disconnected"):
+                quit_event.set()
+
+        # Offer + FULL ICE gathering (aiortc completes gathering in
+        # setLocalDescription, so localDescription.sdp carries all candidates —
+        # the WMA bridge does not support trickle ICE).
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+
+        answer = await _post_offer(self.app_id, pc.localDescription.sdp, key)
+        await pc.setRemoteDescription(
+            RTCSessionDescription(sdp=answer["sdp"], type=answer.get("type", "answer"))
+        )
+        print(f"[runtime] fal WMA connected · {self.app_id}", flush=True)
+
+        stop = asyncio.Event()
+        session_id = answer.get("session_id")
+        hb = (
+            asyncio.ensure_future(_heartbeat(session_id, key, stop))
+            if session_id
+            else None
+        )
+        return _FalSession(pc, channel, hb, stop)
