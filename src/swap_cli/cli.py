@@ -305,12 +305,12 @@ def run(
             raise typer.Exit(3) from err
         if not status.valid:
             err_console.print(
-                f"[red]License invalid ({status.reason}). "
+                f"[red]License check failed: {license.explain(status.reason)}.\n"
                 "Buy or renew at https://swap.storelygh.com[/red]"
             )
             raise typer.Exit(3)
         if status.cached:
-            console.print(f"[dim]license: cached ({status.reason})[/dim]")
+            console.print(f"[dim]license: {license.explain(status.reason)}[/dim]")
 
     # Tri-state precedence: an explicit --remove-watermark / --no-remove-
     # watermark wins; when omitted (None) fall back to saved config. This
@@ -1242,24 +1242,25 @@ async def _doctor() -> None:
             f"[red]✗ provider is '{cfg.provider}' but its key isn't set[/red]",
         )
 
-    # Network — DNS for the endpoints we'll hit (both backends, since either
-    # provider may be selected later without re-running doctor).
+    # Network — just the license backend. The provider hosts aren't probed: a
+    # reachability problem there shows up immediately (and with a better message)
+    # when the session connects, so a DNS row per backend was noise.
     backend_host = urlparse(license.BACKEND_URL).hostname or "swap.storelygh.com"
-    for host in (backend_host, "api.decart.ai", "fal.run"):
-        try:
-            await asyncio.to_thread(socket.gethostbyname, host)
-            _add(f"dns {host}", "[green]✓[/green]")
-        except OSError as err:
-            _add(f"dns {host}", f"[red]✗ {err}[/red]")
+    try:
+        await asyncio.to_thread(socket.gethostbyname, backend_host)
+        _add(f"dns {backend_host}", "[green]✓[/green]")
+    except OSError as err:
+        _add(f"dns {backend_host}", f"[red]✗ {err}[/red]")
 
     # License validation
     if cfg.license_key:
         try:
             status = await license.validate(force_online=True)
+            text = license.explain(status.reason)
             if status.valid:
-                _add("license validate", f"[green]✓ {status.reason}[/green]")
+                _add("license validate", f"[green]✓ {text}[/green]")
             else:
-                _add("license validate", f"[red]✗ {status.reason}[/red]")
+                _add("license validate", f"[red]✗ {text}[/red]")
         except license.LicenseError as err:
             _add("license validate", f"[yellow]offline ({err})[/yellow]")
 

@@ -867,10 +867,11 @@ class SwapGUI(ctk.CTk):
             finally:
                 loop.close()
             if not status.valid:
+                reason_text = license.explain(status.reason)
                 self.after(
                     0,
                     lambda: self._status_var.set(
-                        f"License invalid ({status.reason}) — buy at swap.storelygh.com"
+                        f"License: {reason_text} — swap.storelygh.com"
                     ),
                 )
         except Exception:

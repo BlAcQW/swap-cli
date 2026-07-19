@@ -31,6 +31,53 @@ class LicenseError(Exception):
     """Surfaced when license validation fails outright (network + no cache)."""
 
 
+# Plain-English text for each machine reason code. These strings are shown to
+# end users (doctor, the GUI status bar, `swap run`), so they say what happened
+# AND what to do — a bare "http_403" told the user nothing.
+_REASON_TEXT = {
+    "ok": "valid",
+    "cached": "valid (using cached result)",
+    "offline_grace": "valid (cached — license server unreachable)",
+    "no_license_key": "no license key saved — run `swap setup`",
+    "expired": "expired — renew to keep using swap-cli",
+    "revoked": "revoked — contact support",
+    "not_found": "not recognised — check the key with `swap setup`",
+    "machine_limit": "already in use on another machine",
+}
+
+_HTTP_TEXT = {
+    401: "the license server didn't accept the key — check it with `swap setup`",
+    403: (
+        "the license server refused the key — it may be invalid, expired, or "
+        "already in use on another machine. Check it with `swap setup`, or "
+        "contact support if it should be active"
+    ),
+    404: "the license service wasn't found — update swap-cli (`pip install -U swap-cli`)",
+    429: "too many checks in a row — wait a minute and try again",
+}
+
+
+def explain(reason: str) -> str:
+    """Machine reason code → something a user can act on.
+
+    Unknown codes fall through unchanged: the backend may send its own message
+    text, which is already more useful than anything we'd substitute.
+    """
+    if reason in _REASON_TEXT:
+        return _REASON_TEXT[reason]
+    if reason.startswith("http_"):
+        try:
+            code = int(reason[len("http_") :])
+        except ValueError:
+            return reason
+        if code in _HTTP_TEXT:
+            return _HTTP_TEXT[code]
+        if 500 <= code <= 599:
+            return f"the license server had an error ({code}) — try again shortly"
+        return f"the license server rejected the check ({code})"
+    return reason
+
+
 async def validate(*, force_online: bool = False) -> LicenseStatus:
     """Validate the user's license. Uses cached result within OFFLINE_GRACE_SECONDS."""
     cfg = config.load()
