@@ -43,8 +43,11 @@ from .base import FrameSpec
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# fal's only realtime Lucy endpoint (both fal.ai/lucy-2 and /lucy-2.1 point here).
-FAL_REALTIME_APP = "decart/lucy2-vton/realtime"
+# fal's general video-to-video Lucy (Lucy 2.5) — the one that does CHARACTER /
+# identity swap from a reference image, the same job as swap-cli's Decart `lucy-2`.
+# NOT `decart/lucy2-vton/realtime`: that variant is virtual try-on (it changes the
+# outfit, not the person). Both accept the same {prompt, reference_image_url} input.
+FAL_REALTIME_APP = "decart/lucy-2-5/realtime"
 
 # fal gives no model-geometry endpoint, so we pick the capture size ourselves.
 # Matches what Decart negotiates for lucy-2 so switching providers doesn't change

@@ -55,6 +55,15 @@ def test_fal_provider_resolves() -> None:
     assert get_provider("fal").name == "fal"
 
 
+def test_fal_uses_character_swap_model_not_vton() -> None:
+    """The endpoint must be the general video-to-video Lucy (identity/character
+    swap), NOT the virtual-try-on variant, which only changes the outfit."""
+    from swap_cli.providers.fal import FAL_REALTIME_APP, _app_alias
+
+    assert "vton" not in FAL_REALTIME_APP  # try-on model → wrong job for swap-cli
+    assert _app_alias(FAL_REALTIME_APP) == "lucy-2-5"
+
+
 def test_provider_name_is_case_and_space_insensitive() -> None:
     assert get_provider("  FAL ").name == "fal"
 
