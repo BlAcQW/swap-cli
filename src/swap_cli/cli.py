@@ -81,49 +81,72 @@ def setup(
         typer.Option(
             "--decart-key",
             "-d",
-            help="Your Decart API key (dct_…). Prompted if omitted.",
+            help="Optional: Decart API key (dct_…). Normally set in ⚙ Settings.",
+        ),
+    ] = None,
+    fal_api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--fal-key",
+            "-f",
+            help="Optional: fal API key (fal_sk_…). Normally set in ⚙ Settings.",
         ),
     ] = None,
 ) -> None:
-    """Save your license key and Decart API key to the user config dir."""
+    """Save your license key to the user config dir.
+
+    Setup only asks for the LICENSE. The realtime backend's API key (Decart or
+    fal) is entered in ⚙ Settings — the provider is chosen there too, so setup
+    doesn't need to know which one you'll run. The --decart-key/--fal-key flags
+    are here for headless/scripted installs.
+    """
     if not license_key:
-        license_key = typer.prompt("License key (SWAP-CLI-…)")
-    if not decart_api_key:
         # NOT hidden on purpose: a hidden prompt silently drops PASTED input on
         # many Windows terminals, so the key saved empty and `doctor` then said
         # "run setup" forever. Visible echo is fine for one-time local setup.
-        decart_api_key = typer.prompt("Decart API key (dct_…)")
+        license_key = typer.prompt("License key (SWAP-CLI-…)")
 
     license_key = (license_key or "").strip()
     decart_api_key = (decart_api_key or "").strip()
-    # Refuse to "succeed" with empty keys — that was the silent no-op that left
+    fal_api_key = (fal_api_key or "").strip()
+    # Refuse to "succeed" with an empty key — that was the silent no-op that left
     # doctor reporting nothing set. Fail loudly instead.
-    if not license_key or not decart_api_key:
+    if not license_key:
         err_console.print(
-            "[red]Both a license key and a Decart API key are required — "
-            "nothing was saved.[/red]\n"
-            "Re-run [bold]swap setup[/bold], or pass them directly:\n"
-            '  swap setup --license "SWAP-CLI-…" --decart-key "dct_…"'
+            "[red]A license key is required — nothing was saved.[/red]\n"
+            "Re-run [bold]swap setup[/bold], or pass it directly:\n"
+            '  swap setup --license "SWAP-CLI-…"'
         )
         raise typer.Exit(2)
 
-    cfg = config.update(
-        license_key=license_key,
-        decart_api_key=decart_api_key,
+    # Only overwrite a provider key when one was actually passed — otherwise a
+    # bare `swap setup` (re-entering a license) would wipe keys set in Settings.
+    updates: dict[str, object] = {
+        "license_key": license_key,
         # Reset the cached validation so the next launch will re-validate.
-        license_cached_at=None,
-        license_cached_valid_until=None,
-    )
+        "license_cached_at": None,
+        "license_cached_valid_until": None,
+    }
+    if decart_api_key:
+        updates["decart_api_key"] = decart_api_key
+    if fal_api_key:
+        updates["fal_api_key"] = fal_api_key
+
+    cfg = config.update(**updates)
     path = config.config_path()
-    console.print(
-        Panel.fit(
-            f"Saved to [bold]{path}[/bold]\n"
-            f"License: {_redact(cfg.license_key)}\n"
-            f"Decart key: {_redact(cfg.decart_api_key)}\n\n"
-            "Run [bold cyan]swap doctor[/bold cyan] to verify everything works.",
-            title="✓ Setup complete",
-            border_style="green",
+    lines = [f"Saved to [bold]{path}[/bold]", f"License: {_redact(cfg.license_key)}"]
+    if cfg.decart_api_key:
+        lines.append(f"Decart key: {_redact(cfg.decart_api_key)}")
+    if cfg.fal_api_key:
+        lines.append(f"fal key: {_redact(cfg.fal_api_key)}")
+    if not cfg.has_provider_key:
+        lines.append(
+            "\n[yellow]No backend API key yet[/yellow] — add one in "
+            "[bold]⚙ Settings[/bold] (`swap gui`) before going live."
         )
+    lines.append("\nRun [bold cyan]swap doctor[/bold cyan] to verify everything works.")
+    console.print(
+        Panel.fit("\n".join(lines), title="✓ Setup complete", border_style="green")
     )
 
 
@@ -136,7 +159,19 @@ def show_config() -> None:
     table.add_column("value")
     table.add_row("config path", str(config.config_path()))
     table.add_row("license key", _redact(cfg.license_key) or "[red]not set[/red]")
-    table.add_row("decart api key", _redact(cfg.decart_api_key) or "[red]not set[/red]")
+    table.add_row("provider", cfg.provider)
+    # Either provider key is enough, so a missing one is only dim — not red.
+    table.add_row("decart api key", _redact(cfg.decart_api_key) or "[dim]not set[/dim]")
+    table.add_row("fal api key", _redact(cfg.fal_api_key) or "[dim]not set[/dim]")
+    if not cfg.has_provider_key:
+        table.add_row("backend", "[red]✗ no API key — add one in ⚙ Settings[/red]")
+    elif not _provider_key_for(cfg):
+        # Key on file, but for the OTHER backend — the mismatch that only shows
+        # up when you hit Live. Surface it here, same as doctor does.
+        table.add_row(
+            "backend",
+            f"[red]✗ provider is '{cfg.provider}' but its key isn't set[/red]",
+        )
     table.add_row("machine id", config.machine_id())
     if cfg.license_cached_valid_until is not None:
         table.add_row(
@@ -1152,56 +1187,97 @@ def _format_unix(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _provider_key_for(cfg: config.Config) -> str | None:
+    """The API key the CURRENTLY SELECTED provider needs, or None if unset.
+
+    Having a key for the other backend doesn't help at "Live" — the session uses
+    whichever provider is configured — so doctor checks this specifically.
+    """
+    if (cfg.provider or "decart").strip().lower() == "fal":
+        return cfg.fal_api_key
+    return cfg.decart_api_key
+
+
 async def _doctor() -> None:
     cfg = config.load()
     table = Table(title="swap-cli doctor", show_header=False, box=None)
     table.add_column("check", style="dim")
     table.add_column("status")
 
-    # Config
-    if cfg.license_key:
-        table.add_row("license key set", "[green]✓[/green]")
-    else:
-        table.add_row("license key set", "[red]✗ run `swap setup`[/red]")
-    if cfg.decart_api_key:
-        table.add_row("decart api key set", "[green]✓[/green]")
-    else:
-        table.add_row("decart api key set", "[red]✗ run `swap setup`[/red]")
+    # Record each status as we add it. rich's `table.rows` holds Row *metadata*
+    # (style/end_section), not cell text — the old `"✗" in str(row)` scrape was
+    # therefore always False, so doctor exited 0 even when checks failed.
+    statuses: list[str] = []
 
-    # Network — just DNS for the two endpoints we'll hit
+    def _add(check: str, status: str) -> None:
+        statuses.append(status)
+        table.add_row(check, status)
+
+    # Config. The license is required; the backend API key is not collected by
+    # `swap setup` any more (it's set in ⚙ Settings), and EITHER provider is
+    # enough to go live — so a single missing provider key is a warning, and
+    # only having none at all is a failure.
+    if cfg.license_key:
+        _add("license key set", "[green]✓[/green]")
+    else:
+        _add("license key set", "[red]✗ run `swap setup`[/red]")
+
+    _add("provider", f"{cfg.provider} [dim](change in ⚙ Settings)[/dim]")
+    for label, key in (
+        ("decart api key set", cfg.decart_api_key),
+        ("fal api key set", cfg.fal_api_key),
+    ):
+        _add(label, "[green]✓[/green]" if key else "[yellow]⚠ not set[/yellow]")
+    if not cfg.has_provider_key:
+        _add(
+            "backend usable",
+            "[red]✗ no API key for either provider — add one in ⚙ Settings[/red]",
+        )
+    elif not _provider_key_for(cfg):
+        # A key exists, but not for the provider actually selected — this is the
+        # one that bites at "Live", so call it out rather than showing all-green.
+        _add(
+            "backend usable",
+            f"[red]✗ provider is '{cfg.provider}' but its key isn't set[/red]",
+        )
+    else:
+        _add("backend usable", f"[green]✓ {cfg.provider}[/green]")
+
+    # Network — DNS for the endpoints we'll hit (both backends, since either
+    # provider may be selected later without re-running doctor).
     backend_host = urlparse(license.BACKEND_URL).hostname or "swap.storelygh.com"
-    for host in (backend_host, "api.decart.ai"):
+    for host in (backend_host, "api.decart.ai", "fal.run"):
         try:
             await asyncio.to_thread(socket.gethostbyname, host)
-            table.add_row(f"dns {host}", "[green]✓[/green]")
+            _add(f"dns {host}", "[green]✓[/green]")
         except OSError as err:
-            table.add_row(f"dns {host}", f"[red]✗ {err}[/red]")
+            _add(f"dns {host}", f"[red]✗ {err}[/red]")
 
     # License validation
     if cfg.license_key:
         try:
             status = await license.validate(force_online=True)
             if status.valid:
-                table.add_row("license validate", f"[green]✓ {status.reason}[/green]")
+                _add("license validate", f"[green]✓ {status.reason}[/green]")
             else:
-                table.add_row("license validate", f"[red]✗ {status.reason}[/red]")
+                _add("license validate", f"[red]✗ {status.reason}[/red]")
         except license.LicenseError as err:
-            table.add_row("license validate", f"[yellow]offline ({err})[/yellow]")
+            _add("license validate", f"[yellow]offline ({err})[/yellow]")
 
     # Camera (cheap probe)
-    table.add_row("camera probe", _camera_probe_label())
+    _add("camera probe", _camera_probe_label())
 
     # Native deps
-    table.add_row("aiortc import", _import_ok("aiortc"))
-    table.add_row("decart import", _import_ok("decart"))
-    table.add_row("opencv import", _import_ok("cv2"))
-    table.add_row("av import", _import_ok("av"))
+    _add("aiortc import", _import_ok("aiortc"))
+    _add("decart import", _import_ok("decart"))
+    _add("opencv import", _import_ok("cv2"))
+    _add("av import", _import_ok("av"))
 
     # ffmpeg on PATH — RVC needs it for any non-WAV codec; missing
     # ffmpeg accounts for ~half the 'file failed to load' errors per
     # the upstream RVC community.
     if shutil.which("ffmpeg") is not None:
-        table.add_row("ffmpeg on PATH", "[green]✓[/green]")
+        _add("ffmpeg on PATH", "[green]✓[/green]")
     else:
         if sys.platform == "win32":
             hint = "winget install Gyan.FFmpeg"
@@ -1209,13 +1285,13 @@ async def _doctor() -> None:
             hint = "brew install ffmpeg"
         else:
             hint = "sudo apt install ffmpeg"
-        table.add_row("ffmpeg on PATH", f"[red]✗ {hint}[/red]")
+        _add("ffmpeg on PATH", f"[red]✗ {hint}[/red]")
 
     # PyTorch CUDA — only relevant on a machine with an NVIDIA GPU.
     # Common failure: the user pip-installed torch from PyPI default,
     # got the CPU wheel, and then RVC silently falls back to CPU. Surface
     # it explicitly so they notice without running a session.
-    table.add_row("torch CUDA", _torch_cuda_label())
+    _add("torch CUDA", _torch_cuda_label())
 
     # RVC base models — hubert_base.pt + rmvpe.pt. First session
     # downloads these ~370 MB; until that finishes, the session waits.
@@ -1224,9 +1300,9 @@ async def _doctor() -> None:
 
     rvc_check = voice_prereq._check_rvc_base_models()
     if rvc_check.ok:
-        table.add_row("rvc base models", f"[green]✓ {rvc_check.label}[/green]")
+        _add("rvc base models", f"[green]✓ {rvc_check.label}[/green]")
     else:
-        table.add_row(
+        _add(
             "rvc base models",
             f"[yellow]⚠ {rvc_check.label} — {rvc_check.hint}[/yellow]",
         )
@@ -1235,9 +1311,9 @@ async def _doctor() -> None:
     # the deepfake straight into Zoom/Meet/Discord without OBS open.
     vcam_check = voice_prereq._check_obs_vcam()
     if vcam_check.ok:
-        table.add_row("virtual camera", f"[green]✓ {vcam_check.label}[/green]")
+        _add("virtual camera", f"[green]✓ {vcam_check.label}[/green]")
     else:
-        table.add_row(
+        _add(
             "virtual camera",
             f"[yellow]⚠ {vcam_check.label} — {vcam_check.hint}[/yellow]",
         )
@@ -1245,23 +1321,22 @@ async def _doctor() -> None:
     # Watermark removal template (Sprint 15) — show whether a captured
     # template exists and is loadable, so users know if --remove-watermark
     # will actually do anything.
-    table.add_row("watermark template", _watermark_template_label())
+    _add("watermark template", _watermark_template_label())
 
     # macOS-only: customtkinter needs Tcl/Tk >= 8.6.9. The system Python
     # ships 8.5.9 which fails silently or renders broken windows. Surface
     # this here so users know to switch to python.org Python or
     # `brew install python-tk@3.11`.
     if sys.platform == "darwin":
-        table.add_row("tcl/tk version", _tcl_tk_label())
+        _add("tcl/tk version", _tcl_tk_label())
 
     console.print(table)
 
-    failures = sum(
-        1
-        for row in table.rows
-        if "✗" in str(row)  # naive — we just inspect the rendering
-    )
+    # ✗ = broken (exit 1 so scripts/CI can gate on it). ⚠ = degraded but usable
+    # (e.g. only one provider key set) and must NOT fail the run.
+    failures = sum(1 for status in statuses if "✗" in status)
     if failures:
+        err_console.print(f"[red]{failures} check(s) failed.[/red]")
         sys.exit(1)
 
 

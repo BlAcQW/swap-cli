@@ -66,8 +66,15 @@ class Config:
     fal_api_key: str | None = None
 
     @property
+    def has_provider_key(self) -> bool:
+        """True when at least one realtime backend is usable. `swap setup` only
+        collects the license; the provider key is set in ⚙ Settings (or via
+        `swap setup --fal-key/--decart-key`), and either provider is enough."""
+        return bool(self.decart_api_key) or bool(self.fal_api_key)
+
+    @property
     def is_complete(self) -> bool:
-        return bool(self.license_key) and bool(self.decart_api_key)
+        return bool(self.license_key) and self.has_provider_key
 
 
 def config_path() -> Path:

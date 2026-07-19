@@ -16,6 +16,18 @@ def isolate_config_dir(monkeypatch, tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _cfg(**kwargs) -> config.Config:
+    """Config with the required positional fields defaulted, so a test can name
+    only the fields it actually cares about."""
+    base = dict(
+        license_key=None,
+        decart_api_key=None,
+        license_cached_at=None,
+        license_cached_valid_until=None,
+    )
+    return config.Config(**{**base, **kwargs})
+
+
 def test_load_when_missing_returns_empty_config() -> None:
     cfg = config.load()
     assert cfg.license_key is None
@@ -34,6 +46,24 @@ def test_save_and_load_round_trips(tmp_path: Path) -> None:
     reloaded = config.load()
     assert reloaded == cfg
     assert reloaded.is_complete is True
+
+
+def test_is_complete_accepts_a_fal_key_alone() -> None:
+    """`swap setup` only collects the license; the backend key comes from ⚙
+    Settings and EITHER provider is enough — a fal-only user is fully set up."""
+    cfg = _cfg(license_key="SWAP-CLI-AAAA-BBBB-CCCC", fal_api_key="fal_sk_test123")
+    assert cfg.has_provider_key is True
+    assert cfg.is_complete is True
+
+
+def test_is_complete_needs_a_license_and_some_provider_key() -> None:
+    licensed = _cfg(license_key="SWAP-CLI-AAAA-BBBB-CCCC")
+    assert licensed.has_provider_key is False
+    assert licensed.is_complete is False  # licensed but no backend to run on
+
+    keyed = _cfg(fal_api_key="fal_sk_test123")
+    assert keyed.has_provider_key is True
+    assert keyed.is_complete is False  # backend but unlicensed
 
 
 def test_update_patches_existing_values() -> None:
