@@ -109,10 +109,14 @@ async def validate(*, force_online: bool = False) -> LicenseStatus:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(LICENSE_VALIDATE_URL, json=payload)
     except httpx.RequestError as err:
-        # Network down — fall back to last cached result if still within grace
+        # Network down — fall back to the last cached result if it's still
+        # within grace AND the license itself hasn't expired. The expiry check
+        # matters: without it, offline grace would extend a lapsed license by up
+        # to OFFLINE_GRACE_SECONDS (the cached path above already checks it).
         if (
             cfg.license_cached_at is not None
             and cfg.license_cached_valid_until is not None
+            and cfg.license_cached_valid_until > now
             and (now - cfg.license_cached_at) < OFFLINE_GRACE_SECONDS
         ):
             return LicenseStatus(

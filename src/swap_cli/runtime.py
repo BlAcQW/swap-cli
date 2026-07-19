@@ -97,9 +97,47 @@ class RunOptions:
     fal_api_key: str = ""
 
 
+async def _require_valid_license(notify: Callable[[str], None]) -> None:
+    """Refuse to start a session without a valid license.
+
+    Lives here, not in the GUI's Live handler, because run_session is the ONE
+    choke point every caller funnels through (CLI, GUI, anything future) — the
+    GUI previously did only a "best-effort, non-blocking" check that set a
+    status label, so any non-empty key string could stream indefinitely.
+
+    force_online=True is deliberate: the plain cached path would honour a stale
+    "valid" for up to OFFLINE_GRACE_SECONDS, so a REVOKED user could keep
+    streaming for a day. Going to the server on every session start makes a
+    revocation effective at the next launch. The offline grace still applies —
+    validate() falls back to the cache when the server is genuinely unreachable
+    (a network error), so a paying user on a flaky connection keeps working.
+    Only "never validated AND unreachable" is refused, matching `swap run`.
+    """
+    from . import license
+
+    notify("Verifying license…")
+    try:
+        status = await license.validate(force_online=True)
+    except license.LicenseError as err:
+        raise RuntimeError(
+            f"Couldn't verify your license: {err}\n"
+            "Check your internet connection and try again."
+        ) from err
+    if not status.valid:
+        raise RuntimeError(
+            f"License check failed: {license.explain(status.reason)}.\n"
+            "Buy or renew at https://swap.storelygh.com"
+        )
+    print(f"[runtime] license ok ({status.reason})", flush=True)
+
+
 async def run_session(opts: RunOptions) -> None:
     """Open a realtime Decart session and stream until the user quits."""
     print("[runtime] entering run_session", flush=True)
+
+    # Gate FIRST — before the camera is opened or any provider is contacted, so
+    # an unlicensed run never grabs the webcam or bills a backend.
+    await _require_valid_license(opts.on_status_change)
 
     # Make TLS verification trust certifi's public-CA bundle IN ADDITION to the
     # OS store (must happen before aiohttp builds its SSL context below). A fresh
