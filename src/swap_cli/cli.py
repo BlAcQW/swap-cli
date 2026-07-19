@@ -1222,26 +1222,25 @@ async def _doctor() -> None:
     else:
         _add("license key set", "[red]✗ run `swap setup`[/red]")
 
-    _add("provider", f"{cfg.provider} [dim](change in ⚙ Settings)[/dim]")
     for label, key in (
         ("decart api key set", cfg.decart_api_key),
         ("fal api key set", cfg.fal_api_key),
     ):
         _add(label, "[green]✓[/green]" if key else "[yellow]⚠ not set[/yellow]")
+    # Only surfaced when it's a PROBLEM — a healthy setup shows nothing here, so
+    # the table stays quiet. Still caught: no key at all, or a key for a provider
+    # other than the selected one (which otherwise only fails at "Live", since
+    # both key rows above can look fine on their own).
     if not cfg.has_provider_key:
         _add(
             "backend usable",
             "[red]✗ no API key for either provider — add one in ⚙ Settings[/red]",
         )
     elif not _provider_key_for(cfg):
-        # A key exists, but not for the provider actually selected — this is the
-        # one that bites at "Live", so call it out rather than showing all-green.
         _add(
             "backend usable",
             f"[red]✗ provider is '{cfg.provider}' but its key isn't set[/red]",
         )
-    else:
-        _add("backend usable", f"[green]✓ {cfg.provider}[/green]")
 
     # Network — DNS for the endpoints we'll hit (both backends, since either
     # provider may be selected later without re-running doctor).
