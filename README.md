@@ -1,14 +1,14 @@
 # swap-cli
 
-**Real-time deepfake on your desktop. Bring your own Decart API key.**
+**Real-time deepfake on your desktop. Bring your own API key.**
 
-Live face-swap built on Decart Lucy 2 — your camera, your machine,
-your Decart account. We charge once for the wrapper; you pay Decart
-directly for the seconds you stream.
+Live face-swap built on Decart's Lucy realtime model — your camera, your
+machine, your account. We charge once for the wrapper; you pay the AI backend
+(fal.ai or Decart) directly for the seconds you stream.
 
 ```bash
 pip install swap-cli
-swap setup        # paste license + Decart key, one time
+swap setup        # paste your license key, one time
 swap doctor       # verify everything works
 swap gui          # OR  swap run -r face.jpg
 ```
@@ -17,12 +17,59 @@ swap gui          # OR  swap run -r face.jpg
 
 ## What you need before you start
 
+### 1. Always required
+
 | Item | Where to get it | Cost |
 |---|---|---|
 | A laptop with a webcam | Your own | — |
 | Python 3.11+ | [python.org](https://python.org) / Homebrew | Free |
-| **swap-cli license key** | Bought at [swap.storelygh.com](https://swap.storelygh.com) | One-time fee |
-| **Decart API key** | [platform.decart.ai](https://platform.decart.ai) | Free credits → ~$0.01/sec after |
+| **swap-cli license key** | [swap.storelygh.com](https://swap.storelygh.com) | One-time fee |
+| **swap-cli itself** | `pip install swap-cli` | — |
+
+### 2. An AI backend key — pick ONE
+
+The swap runs on the same Lucy model either way; the difference is the
+watermark and who bills you. Set it in **⚙ Settings** (`swap setup` only asks
+for your license key).
+
+| Backend | Where to get the key | Cost | Watermark |
+|---|---|---|---|
+| **fal.ai** *(recommended)* | [fal.ai/dashboard/keys](https://fal.ai/dashboard/keys) | ~$0.02/sec, pay as you go | **None** |
+| Decart | [platform.decart.ai](https://platform.decart.ai) | Free credits → ~$0.02/sec | Adds an "✦ AI Generated" badge |
+
+> Decart stamps its badge at the account level and won't lift it on request.
+> swap-cli can remove it per frame (`Remove watermark` in the GUI), but fal's
+> output has no badge to begin with — which is why it's the default recommendation.
+
+### 3. A camera driver — only if you want swap-cli inside a video call
+
+Without this, swap-cli still runs and shows its preview window; you just can't
+select it as a camera in Zoom/WhatsApp/etc. **Which one you need depends on the
+app you're calling from:**
+
+| Driver | Download | Works in | Does NOT work in |
+|---|---|---|---|
+| **DroidCam drivers** | [dev47apps releases](https://github.com/dev47apps/droidcam-obs-virtual-output/releases) → `DroidCam.Drivers.exe` | **WhatsApp Desktop**, Zoom, Meet, Discord | — (Windows only) |
+| **OBS Studio** | [obsproject.com/download](https://obsproject.com/download) | Zoom, Meet, Discord, Teams | **WhatsApp Desktop** |
+
+> **Downloading DroidCam? Take `DroidCam.Drivers.exe` only** — *not*
+> `DroidCam.OBSVirtualOut.Plugin.exe`. swap-cli replaces that plugin and writes
+> to the drivers directly, so you need neither the plugin nor OBS. Installing
+> both would make two programs fight over the same buffer.
+>
+> **Why WhatsApp is fussy:** OBS's camera is a DirectShow filter, which
+> WhatsApp Desktop doesn't enumerate. DroidCam registers a *real* camera device
+> ("Droidcam Video" in Device Manager), so WhatsApp accepts it.
+
+Pick the driver in the GUI under **Camera output**. Neither is needed for
+recording to a file or for the preview window.
+
+### 4. Optional extras
+
+| Item | Download | What it's for |
+|---|---|---|
+| ffmpeg | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / `brew install ffmpeg` | Voice cloning; non-WAV audio |
+| Virtual audio cable | [VB-Cable](https://vb-audio.com/Cable/) / `brew install blackhole-2ch` | Routing cloned voice into calls |
 
 ---
 
@@ -33,7 +80,9 @@ pip install swap-cli
 ```
 
 Pulls native deps: `decart`, `aiortc`, `opencv-python`, `customtkinter`,
-`pyvirtualcam`. ~150 MB, ~60 seconds on a normal connection.
+`pyvirtualcam`, `fal-client`. ~150 MB, ~60 seconds on a normal connection.
+Nothing else is needed to *run* swap-cli — the downloads in section 3 above
+only matter for appearing as a camera inside a video call.
 
 If `swap` isn't on your `$PATH` after install, fix it:
 
@@ -63,16 +112,23 @@ python -m swap_cli --help
 ```bash
 $ swap setup
 License key (SWAP-CLI-…): SWAP-CLI-7K3M-9PQR-XW4T
-Decart API key (dct_…):  ************************
 
 ╭───────── ✓ Setup complete ─────────╮
 │ Saved to ~/.config/swap-cli/config.toml
 │ License: SWAP…XW4T
-│ Decart key: dct_…AB12
+│ No backend API key yet — add one in ⚙ Settings
 ╰────────────────────────────────────╯
 ```
 
-Both keys live at `~/.config/swap-cli/config.toml` (`chmod 600`).
+Setup only asks for your **license**. Add your fal (or Decart) API key in
+**⚙ Settings** inside `swap gui`, where you also choose which backend runs the
+swap. For scripted installs you can pass keys directly instead:
+
+```bash
+swap setup --license "SWAP-CLI-…" --fal-key "fal_sk_…"
+```
+
+Everything lives at `~/.config/swap-cli/config.toml` (`chmod 600`).
 Linux/macOS: `~/.config/swap-cli/`. Windows: `%APPDATA%\swap-cli\`.
 
 ---
@@ -83,18 +139,20 @@ Linux/macOS: `~/.config/swap-cli/`. Windows: `%APPDATA%\swap-cli\`.
 $ swap doctor
                  swap-cli doctor
  license key set         ✓
- decart api key set      ✓
+ decart api key set      ⚠ not set
+ fal api key set         ✓
  dns swap.storelygh.com  ✓
- dns api.decart.ai        ✓
- license validate         ✓ ok
- camera probe             ✓
- aiortc import            ✓
- decart import            ✓
- opencv import            ✓
- av import                ✓
+ license validate        ✓ valid
+ camera probe            ✓
+ aiortc import           ✓
+ opencv import           ✓
+ av import               ✓
+ virtual camera          ✓ DroidCam camera ready (works in WhatsApp)
 ```
 
-Any ✗ tells you exactly what to fix before opening a real session.
+**✗ = broken**, and `swap doctor` exits non-zero so scripts can gate on it.
+**⚠ = fine to ignore** — above, only one backend key is set, which is all you
+need. Every ✗ names the fix.
 
 ---
 
@@ -223,7 +281,7 @@ Instagram, upload anywhere.
 
 ## Costs you pay, ongoing
 
-We bill once for the license. Compute is on your Decart account.
+We bill once for the license. Compute is on your own fal.ai or Decart account.
 
 | Decart pricing tier (your account) | Cost / sec | 5 min session | 1 hour session |
 |---|---|---|---|
@@ -238,7 +296,7 @@ Your Decart dashboard shows the running tally. We're never in that loop.
 
 | Command | Purpose |
 |---|---|
-| `swap setup` | Save license + Decart API key |
+| `swap setup` | Save your license key (backend key goes in ⚙ Settings) |
 | `swap config` | Show current config (keys redacted) |
 | `swap doctor` | Verify camera, network, license, deps |
 | `swap gui` | Launch the desktop GUI |
@@ -291,6 +349,7 @@ features.
 | Live deepfake (Decart Lucy 2) | ✅ Works — runs in Decart's cloud, no local GPU needed |
 | `swap gui` (customtkinter window) | ⚠️ Needs Tcl/Tk ≥ 8.6.9 — system Python's 8.5.9 won't work; use python.org or `brew install python-tk@3.11` |
 | Virtual camera output → Zoom / Meet / Discord | ✅ Works via OBS Virtual Camera (install OBS Studio once) |
+| Virtual camera output → WhatsApp Desktop | ✅ Windows only, via the DroidCam drivers — OBS's camera is refused by WhatsApp |
 | `swap voices add` (one-shot reference voice extraction) | ✅ Works on CPU, ~5 s per add |
 | Live RVC voice streaming on **Apple Silicon** | ⚠️ CPU-only — too slow for real-time conversation; doctor reports honestly |
 | Live RVC voice streaming on **Intel Mac** | ❌ Unsupported (no NVIDIA, no usable CPU path) |
@@ -348,7 +407,7 @@ Your machine ID stays stable so you don't burn a slot on the seat cap.
 
 ## Privacy
 
-- Your **Decart API key** never leaves your machine.
+- Your **backend API key** (fal or Decart) never leaves your machine.
 - License validation pings `swap.storelygh.com` once per launch with
   a hashed machine ID. No camera frames, no IP geolocation, no analytics.
 - Generated frames stay on your machine unless you opt in to recording.
