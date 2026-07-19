@@ -1657,13 +1657,15 @@ class _SettingsModal(ctk.CTkToplevel):
         super().__init__(parent)
         self._parent = parent
         self.title("Settings")
-        self.geometry("560x420")
+        self.geometry("560x560")
         self.resizable(False, False)
         self.after(0, self._center_on_parent)
 
         cfg = config.load()
 
-        outer = ctk.CTkFrame(self, fg_color="transparent")
+        # Scrollable so added sections (e.g. the fal key) can never overflow off
+        # the bottom of a fixed-height modal without a way to reach them.
+        outer = ctk.CTkScrollableFrame(self, fg_color="transparent")
         outer.pack(fill="both", expand=True, padx=20, pady=18)
 
         ctk.CTkLabel(
