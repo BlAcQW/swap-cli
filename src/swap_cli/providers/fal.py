@@ -5,26 +5,36 @@ fal resells the identical Lucy realtime model (`decart/lucy2-vton/realtime`) at
 the same $0.02/sec pay-as-you-go, on fal's own Decart account — so its watermark
 policy may differ. Same model = same quality.
 
-Transport: fal's realtime is a plain **msgpack websocket** (there is NO WebRTC —
-confirmed by reading fal's own SDK, `fal-ai/fal-js`). The wire protocol, extracted
-from `realtime.ts` + the `camera-turbo` webcam demo:
+Transport: fal's realtime is **WebRTC**, negotiated over a websocket. The
+websocket is a *signaling channel only* — the transformed video flows over a
+peer connection, exactly like Decart's own realtime API (fal just proxies it).
+Confirmed against fal's client (`fal.realtime.connect` + `handleResult`, which
+builds `new RTCPeerConnection({iceServers})` from an `iceservers` result) and the
+Decart SDK's `decart/realtime/webrtc_connection.py` (a working aiortc build of the
+same offer/answer/ice-candidate flow).
 
-  1. POST https://rest.fal.ai/tokens/ (Authorization: Key <fal-key>) with
-     {"allowed_apps": ["<alias>"], "token_expiration": 120} → a JWT.
-  2. Open  wss://fal.run/<app>/realtime?fal_jwt_token=<JWT>
-  3. Send each frame as msgpack {"prompt", "image_bytes": <raw JPEG bytes>,
-     "reference_image_url": <ref>} — RAW bytes, not a base64 data-URI (that's the
-     queue API's shape; sending it here is likely why earlier attempts got
-     "Error while forwarding the request").
-  4. Read msgpack results; the frame comes back as raw bytes under images[0].content.
+Wire sequence, all over the one websocket we open (token → `wss://fal.run/<app>?fal_jwt_token=`):
 
-`FalTrack` wraps the persistent websocket and exposes the same `async recv()`
-contract `Display` expects, so watermark removal, the OBS virtual camera,
-recording and the preview are all unaware of which provider is live.
+  1. POST https://rest.fal.ai/tokens/ (Authorization: Key <key>) → short-lived JWT.
+  2. Open the websocket.
+  3. Send the initial identity: {"prompt", "reference_image_url"} (fal's first `send`).
+  4. Server → {"type":"iceservers","iceservers":[{urls,username,credential}]} →
+     build the aiortc peer with those ICE servers, add the camera track.
+  5. Client → {"type":"offer","sdp"}; server → {"type":"answer","sdp"};
+     {"type":"ice-candidate","candidate":{candidate,sdpMid,sdpMLineIndex}} both ways.
+  6. The remote WebRTC track carries the transformed video → handed to
+     `on_remote_stream`, the SAME consumer the Decart provider feeds. So watermark
+     removal, the OBS virtual camera, recording and the preview are unaware of
+     which provider is live.
+
+Client sends are msgpack dicts (fal's `connection.send`); server frames arrive as
+msgpack OR JSON strings — both decoded.
 """
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,10 +51,12 @@ FAL_REALTIME_APP = "decart/lucy2-vton/realtime"
 # the user's framing, and keeps the bundled watermark template's scale sane.
 DEFAULT_FRAME_SPEC = FrameSpec(width=1280, height=720, fps=20)
 
-# JPEG quality for the per-frame upload. Every frame crosses the wire, so this is
-# a direct latency/bandwidth knob: 80 keeps the badge/text legible for detection
-# while staying far smaller than PNG.
-_JPEG_QUALITY = 80
+# WebRTC negotiation (offer → answer → ICE → connected) can involve TURN relays,
+# so give it a little more room than Decart's direct path before giving up.
+FAL_CONNECT_TIMEOUT_S = 60.0
+
+REST_TOKENS_URL = "https://rest.fal.ai/tokens/"
+_WS_BASE = "wss://fal.run"
 
 
 def _data_uri(raw: bytes, content_type: str) -> str:
@@ -53,16 +65,6 @@ def _data_uri(raw: bytes, content_type: str) -> str:
     import base64
 
     return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
-
-
-def _encode_frame_jpeg(bgr: Any, quality: int = _JPEG_QUALITY) -> str:
-    """BGR ndarray → `data:image/jpeg;base64,...` (what fal's image_url wants)."""
-    import cv2
-
-    ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-    if not ok:
-        raise RuntimeError("failed to JPEG-encode frame for fal")
-    return _data_uri(buf.tobytes(), "image/jpeg")
 
 
 def _encode_reference(reference: str) -> str:
@@ -75,58 +77,7 @@ def _encode_reference(reference: str) -> str:
     return reference  # already a URL
 
 
-def _decode_result(result: dict[str, Any]) -> Any:
-    """Pull the transformed frame out of fal's reply → BGR ndarray.
-
-    fal returns the image under a few shapes depending on the model/version, so
-    probe the known ones rather than assuming a single key.
-    """
-    import base64
-
-    import cv2
-    import numpy as np
-
-    # fal signals a rejected request with an `error` field instead of an image —
-    # surface its actual text so the cause is diagnosable, not just "no image".
-    if "error" in result and not any(
-        k in result for k in ("image", "images", "output", "frame")
-    ):
-        detail = result.get("error")
-        for extra in ("detail", "message", "reason"):
-            if extra in result:
-                detail = f"{detail} · {extra}={result[extra]!r}"
-        raise RuntimeError(f"fal rejected the request: {detail!r}")
-
-    payload: Any = None
-    for key in ("image", "images", "image_url", "output", "frame"):
-        if key in result:
-            payload = result[key]
-            break
-    if payload is None:
-        raise RuntimeError(f"no image in fal response (keys: {sorted(result)})")
-    if isinstance(payload, list) and payload:
-        payload = payload[0]
-    if isinstance(payload, dict):
-        payload = payload.get("url") or payload.get("content") or payload.get("data")
-    if isinstance(payload, str):
-        if payload.startswith("data:"):
-            payload = payload.split(",", 1)[1]
-        raw = base64.b64decode(payload)
-    elif isinstance(payload, (bytes, bytearray)):
-        raw = bytes(payload)
-    else:
-        raise RuntimeError(f"unsupported fal image payload: {type(payload)!r}")
-
-    frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-    if frame is None:
-        raise RuntimeError("failed to decode the frame fal returned")
-    return frame
-
-
-# --- realtime websocket protocol (mirrors fal-ai/fal-js realtime.ts) ----------
-
-REST_TOKENS_URL = "https://rest.fal.ai/tokens/"
-_WS_BASE = "wss://fal.run"
+# --- fal realtime websocket protocol (auth + URL; mirrors fal-ai/fal-js) --------
 
 
 def _app_alias(app: str) -> str:
@@ -167,128 +118,267 @@ async def _fetch_realtime_token(key: str, alias: str) -> str:
     return token
 
 
-def _jpeg_bytes(bgr: Any, quality: int = _JPEG_QUALITY) -> bytes:
-    """BGR ndarray → raw JPEG bytes (the realtime `image_bytes` field)."""
-    import cv2
-
-    ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-    if not ok:
-        raise RuntimeError("failed to JPEG-encode frame for fal")
-    return buf.tobytes()
+# --- WebRTC signaling helpers (pure, unit-testable) -----------------------------
 
 
-def _encode_input(prompt: str, reference: str | None, jpeg: bytes) -> bytes:
-    """msgpack-encode one realtime request (raw JPEG bytes, per the webcam demo)."""
-    import msgpack
+def _ice_servers_from(msg: dict[str, Any]) -> list[Any]:
+    """`{type:'iceservers', iceservers:[{urls,username,credential}]}` → aiortc
+    RTCIceServer list. Tolerates the casing fal's client itself guards for
+    (`iceservers` / `iceServers` / `ice_servers`)."""
+    from aiortc import RTCIceServer
 
-    msg: dict[str, Any] = {"prompt": prompt or "", "image_bytes": jpeg}
-    if reference:
-        msg["reference_image_url"] = reference
-    return msgpack.packb(msg, use_bin_type=True)
-
-
-def _is_control_message(msg: Any) -> bool:
-    """True for fal's non-result frames we must skip (keepalive / timeout)."""
-    if not isinstance(msg, dict):
-        return False
-    if msg.get("type") == "x-fal-message":
-        return True
-    return msg.get("type") == "x-fal-error" and msg.get("error") == "TIMEOUT"
-
-
-class FalTrack:
-    """Track-like adapter over fal's realtime websocket: pull a camera frame, send
-    it as one msgpack request, read the transformed frame back — so `Display`
-    treats fal exactly like a Decart remote track.
-
-    Serial (send → recv per frame): the model is stateful per connection, so we
-    keep one request in flight.
-    """
-
-    kind = "video"
-
-    def __init__(self, camera: Any, ws: Any, state: dict[str, Any]) -> None:
-        self._camera = camera
-        self._ws = ws
-        self._state = state  # {"prompt": str, "reference_image_url": str | None}
-        self._closed = False
-        self._logged_first = False
-
-    async def recv(self) -> Any:
-        if self._closed:
-            raise RuntimeError("fal track closed")
-        import av
-        import msgpack
-
-        frame = await self._camera.recv()
-        bgr = frame.to_ndarray(format="bgr24")
-        await self._ws.send(
-            _encode_input(
-                self._state.get("prompt", ""),
-                self._state.get("reference_image_url"),
-                _jpeg_bytes(bgr),
+    raw = msg.get("iceservers") or msg.get("iceServers") or msg.get("ice_servers") or []
+    servers: list[Any] = []
+    for s in raw:
+        if not isinstance(s, dict):
+            continue
+        urls = s.get("urls") or s.get("url")
+        if not urls:
+            continue
+        servers.append(
+            RTCIceServer(
+                urls=urls,
+                username=s.get("username"),
+                credential=s.get("credential"),
             )
         )
-
-        # Read until an actual result (skip keepalive/timeout control frames).
-        # fal sends BOTH binary (msgpack) and text (JSON) frames — mirror its own
-        # decoder: string → JSON, bytes → msgpack.
-        while True:
-            raw = await self._ws.recv()
-            if isinstance(raw, (bytes, bytearray)):
-                msg = msgpack.unpackb(raw, raw=False)
-            elif isinstance(raw, str):
-                import json
-
-                msg = json.loads(raw)
-            else:
-                msg = raw
-            if not self._logged_first:
-                self._logged_first = True
-                keys = sorted(msg) if isinstance(msg, dict) else type(msg).__name__
-                print(f"[runtime] fal: first reply keys={keys}", flush=True)
-            if _is_control_message(msg):
-                continue
-            break
-
-        out = av.VideoFrame.from_ndarray(_decode_result(msg), format="bgr24")
-        # Preserve timing so downstream recording/vcam pace correctly. Guard the
-        # copies: av rejects a None time_base, and not every source sets one.
-        if frame.pts is not None:
-            out.pts = frame.pts
-        if frame.time_base is not None:
-            out.time_base = frame.time_base
-        return out
-
-    def stop(self) -> None:
-        self._closed = True
+    return servers
 
 
-class _FalSession:
-    def __init__(self, ws: Any, track: FalTrack, state: dict[str, Any]) -> None:
+def _identity_message(prompt: str, reference: str | None) -> dict[str, Any]:
+    """The initial (and update) identity payload fal expects — {prompt,
+    reference_image_url}. `reference` is already a URL or data-URI."""
+    msg: dict[str, Any] = {"prompt": prompt or ""}
+    if reference:
+        msg["reference_image_url"] = reference
+    return msg
+
+
+def _parse_ice_candidate(data: Any) -> Any:
+    """`{candidate,sdpMid,sdpMLineIndex}` → aiortc RTCIceCandidate, or None."""
+    if not isinstance(data, dict):
+        return None
+    cand_str = data.get("candidate") or ""
+    if not cand_str:
+        return None
+    from aiortc.sdp import candidate_from_sdp
+
+    # aiortc parses the SDP attribute value, i.e. without the leading "candidate:".
+    sdp = cand_str[len("candidate:") :] if cand_str.startswith("candidate:") else cand_str
+    candidate = candidate_from_sdp(sdp)
+    candidate.sdpMid = data.get("sdpMid")
+    candidate.sdpMLineIndex = data.get("sdpMLineIndex")
+    return candidate
+
+
+class FalRealtimeConnection:
+    """aiortc WebRTC peer negotiated over fal's signaling websocket.
+
+    Modeled on `decart/realtime/webrtc_connection.py` (the reference implementation
+    of this exact protocol), but speaking fal's envelope — an `iceservers` message
+    supplies the ICE config, and it does not block on Decart-specific acks.
+    """
+
+    def __init__(
+        self,
+        *,
+        ws: Any,
+        camera: Any,
+        on_remote_stream: Callable[[Any], None],
+        notify: Callable[[str], None],
+        quit_event: Any,
+    ) -> None:
         self._ws = ws
-        self._track = track
-        self._state = state
+        self._camera = camera
+        self._on_remote_stream = on_remote_stream
+        self._notify = notify
+        self._quit_event = quit_event
 
-    async def set_identity(self, prompt: str, reference: str) -> None:
-        # No separate "set" — prompt+reference ride with every frame; just update
-        # the state the track sends.
-        if prompt:
-            self._state["prompt"] = prompt
-        if reference:
-            self._state["reference_image_url"] = _encode_reference(reference)
+        self._pc: Any = None
+        self._recv_task: asyncio.Task[Any] | None = None
+        self._ice_queue: list[Any] = []
+        self._done = asyncio.Event()  # negotiation resolved (connected OR errored)
+        self._error: str | None = None
+        self._connected_once = False
+        self._logged_first = False
 
-    async def disconnect(self) -> None:
-        # Teardown must never raise — the caller is already in a finally block.
-        self._track.stop()
-        from contextlib import suppress
+    # -- signaling I/O --------------------------------------------------------
 
-        with suppress(Exception):
+    async def _signal_send(self, obj: dict[str, Any]) -> None:
+        import msgpack
+
+        await self._ws.send(msgpack.packb(obj, use_bin_type=True))
+
+    def _decode_incoming(self, raw: Any) -> Any:
+        import msgpack
+
+        if isinstance(raw, (bytes, bytearray)):
+            return msgpack.unpackb(raw, raw=False)
+        if isinstance(raw, str):
+            import json
+
+            return json.loads(raw)
+        return raw
+
+    # -- lifecycle ------------------------------------------------------------
+
+    async def connect(self, prompt: str, reference: str | None) -> None:
+        """Kick off the handshake and return once the peer is connected.
+
+        Sends the initial identity (which triggers fal to send `iceservers`),
+        then drives the offer/answer exchange from the receive loop. Raises if
+        negotiation fails; caller wraps this in `asyncio.wait_for` for a timeout.
+        """
+        await self._signal_send(_identity_message(prompt, reference))
+        self._recv_task = asyncio.create_task(self._receive_loop())
+        await self._done.wait()
+        if self._error:
+            raise RuntimeError(self._error)
+
+    async def send_identity(self, prompt: str, reference: str | None) -> None:
+        """Re-send {prompt, reference_image_url} on a live connection."""
+        await self._signal_send(_identity_message(prompt, reference))
+
+    async def _receive_loop(self) -> None:
+        try:
+            while True:
+                raw = await self._ws.recv()
+                await self._handle(self._decode_incoming(raw))
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # ws closed / decode error → end negotiation
+            self._fail(f"fal signaling error: {err}")
+        finally:
+            # If the socket closed before we ever reached "connected", unblock
+            # connect() with a clear reason instead of hanging until the timeout.
+            if not self._done.is_set():
+                self._fail("fal websocket closed during negotiation")
+
+    async def _handle(self, msg: Any) -> None:
+        if not isinstance(msg, dict):
+            return
+        mtype = msg.get("type")
+        if not self._logged_first:
+            self._logged_first = True
+            print(f"[runtime] fal signaling: first msg type={mtype!r}", flush=True)
+
+        if mtype in ("iceservers", "iceServers", "ice_servers"):
+            await self._on_iceservers(msg)
+        elif mtype == "answer":
+            await self._on_answer(msg)
+        elif mtype in ("ice-candidate", "candidate", "iceCandidate"):
+            await self._on_candidate(msg)
+        elif mtype == "error":
+            self._fail(f"fal error: {msg.get('error') or msg.get('message') or msg}")
+        else:
+            # Status/handshake frames (e.g. the initial {action,timing,type}) —
+            # log the type so an unhandled step is nameable, then ignore.
+            print(f"[runtime] fal signaling: ignoring type={mtype!r}", flush=True)
+
+    async def _on_iceservers(self, msg: dict[str, Any]) -> None:
+        from aiortc import RTCConfiguration, RTCPeerConnection
+
+        servers = _ice_servers_from(msg)
+        print(f"[runtime] fal signaling: iceservers ({len(servers)} servers)", flush=True)
+        self._notify("fal: negotiating…")
+
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
+        self._pc = pc
+
+        @pc.on("track")
+        def _on_track(track: Any) -> None:
+            print(f"[runtime] fal: remote track ({track.kind})", flush=True)
+            if track.kind == "video":
+                self._on_remote_stream(track)
+
+        @pc.on("connectionstatechange")
+        async def _on_state() -> None:
+            st = pc.connectionState
+            print(f"[runtime] fal connection: {st}", flush=True)
+            self._notify(f"Connection: {st}")
+            if st == "connected":
+                self._connected_once = True
+                self._done.set()
+            elif st in ("failed", "closed"):
+                if self._connected_once:
+                    # A live drop after we were streaming → tear the session down.
+                    with suppress(Exception):
+                        self._quit_event.set()
+                else:
+                    self._fail(f"fal connection {st} before it came up")
+
+        # sendrecv: our camera goes up, the transformed video returns on the same
+        # m-line (mirrors the Decart SDK's addTrack-only setup).
+        pc.addTrack(self._camera)
+
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        await self._signal_send({"type": "offer", "sdp": pc.localDescription.sdp})
+        print("[runtime] fal signaling: offer sent", flush=True)
+
+    async def _on_answer(self, msg: dict[str, Any]) -> None:
+        from aiortc import RTCSessionDescription
+
+        sdp = msg.get("sdp")
+        if not sdp or self._pc is None:
+            return
+        await self._pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
+        print("[runtime] fal signaling: answer received", flush=True)
+        # Flush any ICE candidates that arrived before the remote description.
+        for cand in self._ice_queue:
+            with suppress(Exception):
+                await self._pc.addIceCandidate(cand)
+        self._ice_queue.clear()
+
+    async def _on_candidate(self, msg: dict[str, Any]) -> None:
+        try:
+            candidate = _parse_ice_candidate(msg.get("candidate"))
+        except Exception as err:
+            print(f"[runtime] fal: skipping bad ICE candidate ({err})", flush=True)
+            return
+        if candidate is None:
+            return
+        if self._pc is not None and self._pc.remoteDescription is not None:
+            with suppress(Exception):
+                await self._pc.addIceCandidate(candidate)
+        else:
+            self._ice_queue.append(candidate)  # queue until the answer lands
+
+    def _fail(self, message: str) -> None:
+        if self._error is None:
+            self._error = message
+        self._done.set()
+
+    async def cleanup(self) -> None:
+        """Tear down. Never raises — callers are already in a finally/suppress."""
+        if self._recv_task is not None:
+            self._recv_task.cancel()
+            with suppress(Exception, asyncio.CancelledError):
+                await self._recv_task
+        if self._pc is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await self._pc.close()
+        with suppress(Exception, asyncio.CancelledError):
             await self._ws.close()
 
 
+class _FalSession:
+    def __init__(self, conn: FalRealtimeConnection) -> None:
+        self._conn = conn
+
+    async def set_identity(self, prompt: str, reference: str) -> None:
+        # fal carries the identity in a {prompt, reference_image_url} message;
+        # re-send it so a later identity change still takes effect.
+        ref = _encode_reference(reference) if reference else None
+        with suppress(Exception):
+            await self._conn.send_identity(prompt, ref)
+
+    async def disconnect(self) -> None:
+        await self._conn.cleanup()
+
+
 class FalProvider:
-    """Runs the Lucy realtime model on fal over a hand-rolled msgpack websocket."""
+    """Runs the Lucy realtime model on fal over WebRTC (signaled on a websocket)."""
 
     name = "fal"
     app_id = FAL_REALTIME_APP
@@ -316,12 +406,13 @@ class FalProvider:
             )
 
         try:
-            import msgpack  # noqa: F401 — needed by the track's encode/decode
+            import aiortc  # noqa: F401 — the WebRTC peer
+            import msgpack  # noqa: F401 — needed by the signaling encode/decode
             import websockets
         except ImportError as err:  # pragma: no cover - depends on install extras
             raise RuntimeError(
-                "The fal provider needs websockets + msgpack. Run:  "
-                "pip install websockets msgpack"
+                "The fal provider needs aiortc + websockets + msgpack. Run:  "
+                "pip install aiortc websockets msgpack"
             ) from err
 
         notify("fal: fetching token…")
@@ -330,14 +421,34 @@ class FalProvider:
         ws = await websockets.connect(_realtime_url(self.app_id, token), max_size=None)
         print(f"[runtime] fal realtime websocket open · {self.app_id}", flush=True)
 
-        state: dict[str, Any] = {
-            "prompt": opts.prompt,
-            "reference_image_url": _encode_reference(opts.reference)
-            if opts.reference
-            else None,
-        }
-        track = FalTrack(camera, ws, state)
-        # No remote track to await — hand our adapter straight to the same
-        # consumer the Decart path uses.
-        on_remote_stream(track)
-        return _FalSession(ws, track, state)
+        conn = FalRealtimeConnection(
+            ws=ws,
+            camera=camera,
+            on_remote_stream=on_remote_stream,
+            notify=notify,
+            quit_event=quit_event,
+        )
+        reference = (
+            _encode_reference(opts.reference) if getattr(opts, "reference", "") else None
+        )
+        try:
+            await asyncio.wait_for(
+                conn.connect(opts.prompt, reference),
+                timeout=FAL_CONNECT_TIMEOUT_S,
+            )
+        except TimeoutError as exc:
+            await conn.cleanup()
+            raise RuntimeError(
+                f"fal connection timed out after {FAL_CONNECT_TIMEOUT_S:.0f}s.\n"
+                "Common causes:\n"
+                "  • Firewall blocking UDP — fal's realtime API needs UDP "
+                "traversal for WebRTC ICE.\n"
+                "  • fal API key invalid or out of credits — verify it at "
+                "https://fal.ai/dashboard.\n"
+                "  • You just ended a previous session — wait ~15s and retry."
+            ) from exc
+        except Exception:
+            await conn.cleanup()
+            raise
+
+        return _FalSession(conn)
