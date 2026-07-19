@@ -54,6 +54,11 @@ dependencies = [
     # httpx is already a dep, so it's cheap enough to ship in the base install
     # rather than gate the provider behind an extra.
     "fal-client>=0.5",
+    # The fal provider talks fal's realtime protocol directly (msgpack over a
+    # websocket) — see providers/fal.py. Both ship with fal-client too, but make
+    # them explicit so the provider doesn't depend on that transitively.
+    "websockets>=12",
+    "msgpack>=1.0",
     "aiortc>=1.9",
     "av>=11.0",
     "opencv-python>=4.10",

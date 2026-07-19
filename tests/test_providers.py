@@ -115,19 +115,89 @@ def test_fal_decode_result_surfaces_error_text() -> None:
         _decode_result({"error": "bad reference", "detail": "unsupported format"})
 
 
-# --- fal queue-mode track ---------------------------------------------------
+# --- fal realtime websocket protocol ----------------------------------------
 
-async def test_fal_track_roundtrips_camera_frame_through_queue(monkeypatch) -> None:
-    """FalTrack is what lets Display treat fal like a Decart remote track: pull a
-    camera frame → subscribe → return the transformed frame. Serial over the queue
-    (the laggy verification transport)."""
-    import sys as _sys
-    import types
+def test_app_alias_and_realtime_url() -> None:
+    from swap_cli.providers.fal import _app_alias, _realtime_url
+
+    assert _app_alias("decart/lucy2-vton/realtime") == "lucy2-vton"
+    url = _realtime_url("decart/lucy2-vton/realtime", "JWT.TOK EN")
+    # app id kept verbatim (already ends in /realtime — no doubling); token in query
+    assert url.startswith("wss://fal.run/decart/lucy2-vton/realtime?fal_jwt_token=")
+    assert "JWT.TOK%20EN" in url  # url-encoded
+
+
+async def test_fetch_realtime_token_builds_request(monkeypatch) -> None:
+    """Token POST must hit /tokens/ with Key auth + the alias in allowed_apps,
+    and unwrap the {"detail": jwt} proxy shape."""
+    import httpx
+
+    from swap_cli.providers import fal as falmod
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"detail": "the.jwt.token"}  # wrapped shape
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured.update(url=url, headers=headers, json=json)
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    tok = await falmod._fetch_realtime_token("fal_sk_k", "lucy2-vton")
+
+    assert captured["url"] == falmod.REST_TOKENS_URL
+    assert captured["headers"]["Authorization"] == "Key fal_sk_k"
+    assert captured["json"] == {"allowed_apps": ["lucy2-vton"], "token_expiration": 120}
+    assert tok == "the.jwt.token"
+
+
+def test_encode_input_is_msgpack_with_raw_bytes() -> None:
+    """The realtime frame goes as raw JPEG BYTES under image_bytes (not a data
+    URI) — that's the shape fal's own webcam demo uses."""
+    msgpack = pytest.importorskip("msgpack")
+    from swap_cli.providers.fal import _encode_input
+
+    packed = _encode_input("swap me", "https://x/ref.png", b"\xff\xd8jpeg")
+    msg = msgpack.unpackb(packed, raw=False)
+    assert msg["prompt"] == "swap me"
+    assert msg["image_bytes"] == b"\xff\xd8jpeg"  # raw bytes, not str
+    assert msg["reference_image_url"] == "https://x/ref.png"
+
+
+def test_is_control_message() -> None:
+    from swap_cli.providers.fal import _is_control_message
+
+    assert _is_control_message({"type": "x-fal-message"}) is True
+    assert _is_control_message({"type": "x-fal-error", "error": "TIMEOUT"}) is True
+    assert _is_control_message({"images": [{"content": b"x"}]}) is False
+    assert _is_control_message({"type": "x-fal-error", "error": "BOOM"}) is False
+
+
+async def test_fal_track_roundtrips_over_websocket() -> None:
+    """FalTrack: camera frame → msgpack send → read result → transformed frame.
+    Also skips a leading control (keepalive) frame."""
     from fractions import Fraction
 
     from swap_cli.providers import fal as falmod
 
+    msgpack = pytest.importorskip("msgpack")
     swapped = np.full((16, 32, 3), 180, np.uint8)
+    ok, buf = cv2.imencode(".jpg", swapped)
+    assert ok
 
     class _FakeCamera:
         async def recv(self):
@@ -135,26 +205,31 @@ async def test_fal_track_roundtrips_camera_frame_through_queue(monkeypatch) -> N
             f.pts, f.time_base = 7, Fraction(1, 20)
             return f
 
-    sent: dict = {}
+    sent: list = []
 
-    async def _fake_subscribe_async(app_id, arguments=None):
-        sent.update(app_id=app_id, arguments=arguments)
-        return {"image": falmod._encode_frame_jpeg(swapped)}
+    class _FakeWS:
+        def __init__(self):
+            self._replies = [
+                msgpack.packb({"type": "x-fal-message"}, use_bin_type=True),  # skipped
+                msgpack.packb({"images": [{"content": buf.tobytes()}]}, use_bin_type=True),
+            ]
 
-    # fal_client is imported lazily inside recv(); inject a stub with our fake.
-    stub = types.ModuleType("fal_client")
-    stub.subscribe_async = _fake_subscribe_async
-    monkeypatch.setitem(_sys.modules, "fal_client", stub)
+        async def send(self, data):
+            sent.append(data)
+
+        async def recv(self):
+            return self._replies.pop(0)
 
     state = {"prompt": "swap me", "reference_image_url": "https://x/ref.png"}
-    track = falmod.FalTrack(_FakeCamera(), falmod.FAL_REALTIME_APP, state)
+    track = falmod.FalTrack(_FakeCamera(), _FakeWS(), state)
     out = await track.recv()
 
-    assert sent["app_id"] == falmod.FAL_REALTIME_APP
-    assert sent["arguments"]["prompt"] == "swap me"
-    assert sent["arguments"]["image_url"].startswith("data:image/jpeg;base64,")
-    assert sent["arguments"]["reference_image_url"] == "https://x/ref.png"
-    # Got the transformed frame back, timing preserved.
+    # Sent a msgpack request with raw image_bytes + prompt + reference.
+    req = msgpack.unpackb(sent[0], raw=False)
+    assert req["prompt"] == "swap me"
+    assert isinstance(req["image_bytes"], (bytes, bytearray))
+    assert req["reference_image_url"] == "https://x/ref.png"
+    # Got the transformed frame back (control frame skipped), timing preserved.
     assert out.to_ndarray(format="bgr24").shape == (16, 32, 3)
     assert out.pts == 7
 
@@ -162,7 +237,7 @@ async def test_fal_track_roundtrips_camera_frame_through_queue(monkeypatch) -> N
 async def test_fal_track_raises_when_closed() -> None:
     from swap_cli.providers.fal import FalTrack
 
-    track = FalTrack(camera=None, app_id="x", state={"prompt": ""})
+    track = FalTrack(camera=None, ws=None, state={"prompt": ""})
     track.stop()
     with pytest.raises(RuntimeError, match="closed"):
         await track.recv()

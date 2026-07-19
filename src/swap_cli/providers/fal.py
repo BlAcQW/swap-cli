@@ -5,20 +5,22 @@ fal resells the identical Lucy realtime model (`decart/lucy2-vton/realtime`) at
 the same $0.02/sec pay-as-you-go, on fal's own Decart account — so its watermark
 policy may differ. Same model = same quality.
 
-Transport reality (both documented realtime transports are dead ends in Python):
-  - WMA WebRTC bridge → 404: Decart's Lucy is a marketplace model, not a WMA app.
-  - plain msgpack websocket per-frame → "Error while forwarding the request".
-  - the only smooth path is fal's UNDOCUMENTED WebRTC signaling over the JS SDK.
+Transport: fal's realtime is a plain **msgpack websocket** (there is NO WebRTC —
+confirmed by reading fal's own SDK, `fal-ai/fal-js`). The wire protocol, extracted
+from `realtime.ts` + the `camera-turbo` webcam demo:
 
-So this provider runs the **queue (`subscribe`) path**: one frame per request. It's
-slow (seconds/frame) — a LAGGY preview, not smooth realtime — but it actually
-produces fal's output, which is all we need right now to answer the only question
-that matters: does fal remove the badge and swap the face? If yes, the smooth
-WebRTC transport becomes worth reverse-engineering (a separate, bigger task).
+  1. POST https://rest.fal.ai/tokens/ (Authorization: Key <fal-key>) with
+     {"allowed_apps": ["<alias>"], "token_expiration": 120} → a JWT.
+  2. Open  wss://fal.run/<app>/realtime?fal_jwt_token=<JWT>
+  3. Send each frame as msgpack {"prompt", "image_bytes": <raw JPEG bytes>,
+     "reference_image_url": <ref>} — RAW bytes, not a base64 data-URI (that's the
+     queue API's shape; sending it here is likely why earlier attempts got
+     "Error while forwarding the request").
+  4. Read msgpack results; the frame comes back as raw bytes under images[0].content.
 
-`FalTrack` exposes the same `async recv()` contract `Display` expects, so
-watermark removal, the OBS virtual camera, recording and the preview are all
-unaware of which provider is live.
+`FalTrack` wraps the persistent websocket and exposes the same `async recv()`
+contract `Display` expects, so watermark removal, the OBS virtual camera,
+recording and the preview are all unaware of which provider is live.
 """
 
 from __future__ import annotations
@@ -121,43 +123,126 @@ def _decode_result(result: dict[str, Any]) -> Any:
     return frame
 
 
-class FalTrack:
-    """Track-like adapter over fal's QUEUE path: pull a camera frame, round-trip
-    it through `fal_client.subscribe_async`, return the transformed frame — so
-    `Display` treats fal exactly like a Decart remote track.
+# --- realtime websocket protocol (mirrors fal-ai/fal-js realtime.ts) ----------
 
-    Serial by design (one request in flight): the model is stateful per frame and
-    the queue round-trip (seconds) IS the laggy-preview latency. This is a
-    verification transport, not the smooth-realtime one.
+REST_TOKENS_URL = "https://rest.fal.ai/tokens/"
+_WS_BASE = "wss://fal.run"
+
+
+def _app_alias(app: str) -> str:
+    """`decart/lucy2-vton/realtime` → `lucy2-vton` (owner/alias/path…), matching
+    fal-js parseEndpointId — the token's `allowed_apps` wants the alias only."""
+    parts = app.split("/")
+    return parts[1] if len(parts) > 1 else parts[0]
+
+
+def _realtime_url(app: str, jwt: str) -> str:
+    """wss URL for the app. The id already ends in `/realtime`, so (per fal-js
+    resolveEndpointPath) we do NOT append another path segment."""
+    from urllib.parse import quote
+
+    return f"{_WS_BASE}/{app}?fal_jwt_token={quote(jwt, safe='')}"
+
+
+async def _fetch_realtime_token(key: str, alias: str) -> str:
+    """POST /tokens/ for a short-lived JWT (fal-js getTemporaryAuthToken)."""
+    import httpx
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            REST_TOKENS_URL,
+            headers={"Authorization": f"Key {key}", "Content-Type": "application/json"},
+            json={"allowed_apps": [alias], "token_expiration": 120},
+        )
+    if resp.status_code >= 300:
+        raise RuntimeError(
+            f"fal token request failed (HTTP {resp.status_code}): {resp.text[:200]!r} — "
+            "check the fal API key."
+        )
+    token: Any = resp.json()
+    if isinstance(token, dict):  # some proxies wrap it as {"detail": <jwt>}
+        token = token.get("detail", token)
+    if not isinstance(token, str):
+        raise RuntimeError(f"unexpected token response shape: {type(token)!r}")
+    return token
+
+
+def _jpeg_bytes(bgr: Any, quality: int = _JPEG_QUALITY) -> bytes:
+    """BGR ndarray → raw JPEG bytes (the realtime `image_bytes` field)."""
+    import cv2
+
+    ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        raise RuntimeError("failed to JPEG-encode frame for fal")
+    return buf.tobytes()
+
+
+def _encode_input(prompt: str, reference: str | None, jpeg: bytes) -> bytes:
+    """msgpack-encode one realtime request (raw JPEG bytes, per the webcam demo)."""
+    import msgpack
+
+    msg: dict[str, Any] = {"prompt": prompt or "", "image_bytes": jpeg}
+    if reference:
+        msg["reference_image_url"] = reference
+    return msgpack.packb(msg, use_bin_type=True)
+
+
+def _is_control_message(msg: Any) -> bool:
+    """True for fal's non-result frames we must skip (keepalive / timeout)."""
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("type") == "x-fal-message":
+        return True
+    return msg.get("type") == "x-fal-error" and msg.get("error") == "TIMEOUT"
+
+
+class FalTrack:
+    """Track-like adapter over fal's realtime websocket: pull a camera frame, send
+    it as one msgpack request, read the transformed frame back — so `Display`
+    treats fal exactly like a Decart remote track.
+
+    Serial (send → recv per frame): the model is stateful per connection, so we
+    keep one request in flight.
     """
 
     kind = "video"
 
-    def __init__(self, camera: Any, app_id: str, state: dict[str, Any]) -> None:
+    def __init__(self, camera: Any, ws: Any, state: dict[str, Any]) -> None:
         self._camera = camera
-        self._app_id = app_id
+        self._ws = ws
         self._state = state  # {"prompt": str, "reference_image_url": str | None}
         self._closed = False
+        self._logged_first = False
 
     async def recv(self) -> Any:
         if self._closed:
             raise RuntimeError("fal track closed")
         import av
-        import fal_client
+        import msgpack
 
         frame = await self._camera.recv()
         bgr = frame.to_ndarray(format="bgr24")
+        await self._ws.send(
+            _encode_input(
+                self._state.get("prompt", ""),
+                self._state.get("reference_image_url"),
+                _jpeg_bytes(bgr),
+            )
+        )
 
-        args: dict[str, Any] = {
-            "prompt": self._state.get("prompt", ""),
-            "image_url": _encode_frame_jpeg(bgr),
-        }
-        ref = self._state.get("reference_image_url")
-        if ref:
-            args["reference_image_url"] = ref
+        # Read until an actual result (skip keepalive/timeout control frames).
+        while True:
+            raw = await self._ws.recv()
+            msg = msgpack.unpackb(raw, raw=False) if isinstance(raw, (bytes, bytearray)) else raw
+            if not self._logged_first:
+                self._logged_first = True
+                keys = sorted(msg) if isinstance(msg, dict) else type(msg).__name__
+                print(f"[runtime] fal: first reply keys={keys}", flush=True)
+            if _is_control_message(msg):
+                continue
+            break
 
-        result = await fal_client.subscribe_async(self._app_id, arguments=args)
-        out = av.VideoFrame.from_ndarray(_decode_result(result), format="bgr24")
+        out = av.VideoFrame.from_ndarray(_decode_result(msg), format="bgr24")
         # Preserve timing so downstream recording/vcam pace correctly. Guard the
         # copies: av rejects a None time_base, and not every source sets one.
         if frame.pts is not None:
@@ -171,13 +256,14 @@ class FalTrack:
 
 
 class _FalSession:
-    def __init__(self, track: FalTrack, state: dict[str, Any]) -> None:
+    def __init__(self, ws: Any, track: FalTrack, state: dict[str, Any]) -> None:
+        self._ws = ws
         self._track = track
         self._state = state
 
     async def set_identity(self, prompt: str, reference: str) -> None:
-        # No live connection to update — subscribe re-sends prompt+reference with
-        # every frame, so just update the state the track reads.
+        # No separate "set" — prompt+reference ride with every frame; just update
+        # the state the track sends.
         if prompt:
             self._state["prompt"] = prompt
         if reference:
@@ -186,10 +272,14 @@ class _FalSession:
     async def disconnect(self) -> None:
         # Teardown must never raise — the caller is already in a finally block.
         self._track.stop()
+        from contextlib import suppress
+
+        with suppress(Exception):
+            await self._ws.close()
 
 
 class FalProvider:
-    """Runs the Lucy model on fal via the queue path (laggy verification mode)."""
+    """Runs the Lucy realtime model on fal over a hand-rolled msgpack websocket."""
 
     name = "fal"
     app_id = FAL_REALTIME_APP
@@ -217,17 +307,19 @@ class FalProvider:
             )
 
         try:
-            import fal_client  # noqa: F401 — ensure it's installed before we start
+            import msgpack  # noqa: F401 — needed by the track's encode/decode
+            import websockets
         except ImportError as err:  # pragma: no cover - depends on install extras
             raise RuntimeError(
-                "The fal provider needs the fal client. Run:  pip install fal-client"
+                "The fal provider needs websockets + msgpack. Run:  "
+                "pip install websockets msgpack"
             ) from err
-        import os
 
-        os.environ["FAL_KEY"] = key  # fal_client reads the key from the env
-
-        print(f"[runtime] fal: queue mode (laggy preview) · {self.app_id}", flush=True)
-        notify("fal: queue mode — expect a slow preview (a frame every few seconds).")
+        notify("fal: fetching token…")
+        token = await _fetch_realtime_token(key, _app_alias(self.app_id))
+        notify("fal: connecting…")
+        ws = await websockets.connect(_realtime_url(self.app_id, token), max_size=None)
+        print(f"[runtime] fal realtime websocket open · {self.app_id}", flush=True)
 
         state: dict[str, Any] = {
             "prompt": opts.prompt,
@@ -235,8 +327,8 @@ class FalProvider:
             if opts.reference
             else None,
         }
-        track = FalTrack(camera, self.app_id, state)
+        track = FalTrack(camera, ws, state)
         # No remote track to await — hand our adapter straight to the same
         # consumer the Decart path uses.
         on_remote_stream(track)
-        return _FalSession(track, state)
+        return _FalSession(ws, track, state)
