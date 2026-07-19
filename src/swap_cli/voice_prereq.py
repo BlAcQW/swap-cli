@@ -300,10 +300,31 @@ def _check_obs_vcam() -> Check:
         # as soft-OK and let the runtime open() raise if it isn't there.
         driver_ok = True
 
+    # DroidCam is a separate, complementary path: its driver registers as a real
+    # camera, so Store/Media Foundation apps (WhatsApp Desktop) enumerate it,
+    # which no DirectShow virtual camera can achieve. It needs no pyvirtualcam —
+    # we write to its shared buffer ourselves.
+    droidcam_ok = False
+    if sys.platform == "win32":
+        try:
+            from .droidcam import is_driver_installed
+
+            droidcam_ok = is_driver_installed()
+        except Exception:  # detection must never break doctor
+            droidcam_ok = False
+
+    if droidcam_ok and driver_ok and has_pyvcam:
+        return Check(ok=True, label="OBS + DroidCam cameras ready")
+    if droidcam_ok:
+        return Check(
+            ok=True,
+            label="DroidCam camera ready (works in WhatsApp)",
+        )
     if driver_ok and has_pyvcam:
         return Check(
             ok=True,
-            label="OBS Virtual Camera + pyvirtualcam ready",
+            label="OBS Virtual Camera + pyvirtualcam ready "
+            "(note: WhatsApp needs the DroidCam driver)",
         )
     if driver_ok and not has_pyvcam:
         return Check(

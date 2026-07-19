@@ -79,6 +79,12 @@ class RunOptions:
     # so video-call apps see the deepfake as a camera device. Default off
     # so legacy users / CI without the driver aren't surprised.
     virtual_camera: bool = False
+    # Which camera driver receives the frames. "obs" (default) = OBS Virtual
+    # Camera via pyvirtualcam, a DirectShow filter that Zoom/Meet/Discord see.
+    # "droidcam" = DroidCam's real camera driver, which Media Foundation / Store
+    # apps enumerate — required for WhatsApp Desktop, which ignores DirectShow
+    # virtual cameras entirely. Windows only.
+    vcam_backend: str = "obs"
     # Sprint 15: per-frame watermark removal. Default off — same back-compat
     # rationale as virtual_camera, plus it costs detection+inpaint latency.
     remove_watermark: bool = False
@@ -222,6 +228,7 @@ async def run_session(opts: RunOptions) -> None:
                 quit_event=quit_event,
                 display_box=display_box,
                 virtual_camera=opts.virtual_camera,
+                vcam_backend=opts.vcam_backend,
                 watermark=_build_watermark_remover(opts),
                 show_window=opts.show_preview_window,
                 on_display_ready=opts.on_display_ready,
@@ -388,6 +395,7 @@ def _on_remote_stream(
     quit_event: asyncio.Event,
     display_box: list[Display | None],
     virtual_camera: bool = False,
+    vcam_backend: str = "obs",
     watermark: Any = None,
     show_window: bool = True,
     on_display_ready: Callable[[Any], None] | None = None,
@@ -403,6 +411,7 @@ def _on_remote_stream(
         record_path=record_path,
         on_quit=quit_event.set,
         virtual_camera=virtual_camera,
+        vcam_backend=vcam_backend,
         watermark=watermark,
         show_window=show_window,
     )

@@ -63,6 +63,11 @@ class Config:
     # same Decart Lucy model on its own account, so it's both a second source and
     # a possible way around Decart's watermark (which they refuse to lift for us).
     provider: str = "decart"
+    # Which camera driver receives the output. "obs" = OBS Virtual Camera (a
+    # DirectShow filter — Zoom/Meet/Discord see it, WhatsApp Desktop does NOT).
+    # "droidcam" = DroidCam's real camera driver, which Store/Media Foundation
+    # apps enumerate, so WhatsApp accepts it. Windows only.
+    vcam_backend: str = "obs"
     fal_api_key: str | None = None
 
     @property
@@ -114,6 +119,7 @@ def load() -> Config:
         watermark_template_width=_int_or_none(data.get("watermark_template_width")),
         watermark_signature_fallback=bool(data.get("watermark_signature_fallback", True)),
         provider=_clean(data.get("provider")) or "decart",
+        vcam_backend=_clean(data.get("vcam_backend")) or "obs",
         fal_api_key=_clean(data.get("fal_api_key")),
     )
 
@@ -162,6 +168,8 @@ def save(cfg: Config) -> Path:
         body.append("watermark_signature_fallback = false")
     if cfg.provider and cfg.provider != "decart":
         body.append(f'provider = "{_escape(cfg.provider)}"')
+    if cfg.vcam_backend and cfg.vcam_backend != "obs":
+        body.append(f'vcam_backend = "{_escape(cfg.vcam_backend)}"')
     if cfg.fal_api_key:
         body.append(f'fal_api_key = "{_escape(cfg.fal_api_key)}"')
 
@@ -205,6 +213,7 @@ def update(**kwargs: Any) -> Config:
             "watermark_signature_fallback", current.watermark_signature_fallback
         ),
         provider=kwargs.get("provider", current.provider),
+        vcam_backend=kwargs.get("vcam_backend", current.vcam_backend),
         fal_api_key=kwargs.get("fal_api_key", current.fal_api_key),
     )
     save(merged)

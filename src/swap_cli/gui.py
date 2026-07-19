@@ -291,6 +291,41 @@ class SwapGUI(ctk.CTk):
         self._provider_hint.pack(anchor="w", pady=(2, 0))
         self._on_provider_change(persist=False)  # seed the hint
 
+        # Which camera driver receives the output. OBS's virtual camera is a
+        # DirectShow filter, which WhatsApp Desktop refuses to enumerate — the
+        # DroidCam driver registers as a real camera, so WhatsApp accepts it.
+        # Windows-only, so don't offer the choice elsewhere.
+        if sys.platform == "win32":
+            vcam_row = ctk.CTkFrame(outer, fg_color="transparent")
+            vcam_row.pack(fill="x", pady=(14, 0))
+            ctk.CTkLabel(
+                vcam_row, text="Camera output", anchor="w", font=ctk.CTkFont(size=11)
+            ).pack(anchor="w")
+            self._vcam_backend_var = tk.StringVar(
+                value=(
+                    "DroidCam"
+                    if (_wm_cfg.vcam_backend or "obs") == "droidcam"
+                    else "OBS"
+                )
+            )
+            ctk.CTkSegmentedButton(
+                vcam_row,
+                values=["OBS", "DroidCam"],
+                variable=self._vcam_backend_var,
+                command=lambda _v=None: self._on_vcam_backend_change(),
+            ).pack(anchor="w", fill="x", pady=(2, 0))
+            self._vcam_hint = ctk.CTkLabel(
+                vcam_row,
+                text="",
+                anchor="w",
+                font=ctk.CTkFont(size=10),
+                text_color="#6b7280",
+                wraplength=460,
+                justify="left",
+            )
+            self._vcam_hint.pack(anchor="w", pady=(2, 0))
+            self._on_vcam_backend_change(persist=False)  # seed the hint
+
         # Model selector. Decart fixes width/height/fps per model — we display
         # the native dimensions next to each option so the user knows what
         # they're getting. There is no orientation knob: the SDK only accepts
@@ -659,6 +694,43 @@ class SwapGUI(ctk.CTk):
             with suppress(Exception):
                 config.update(provider=provider)
 
+    def _selected_vcam_backend(self) -> str:
+        """Which camera driver to feed. Defaults to OBS everywhere the DroidCam
+        picker isn't offered (non-Windows), so behaviour is unchanged there."""
+        var = getattr(self, "_vcam_backend_var", None)
+        if var is None:
+            return "obs"
+        return "droidcam" if var.get().strip().lower() == "droidcam" else "obs"
+
+    def _on_vcam_backend_change(self, persist: bool = True) -> None:
+        """Explain which apps each driver reaches, and persist the choice."""
+        backend = self._selected_vcam_backend()
+        cfg = config.load()
+        if backend == "droidcam":
+            from .droidcam import is_driver_installed
+
+            if is_driver_installed():
+                hint = (
+                    "DroidCam — works in WhatsApp Desktop (and Zoom/Meet). Pick "
+                    "'Droidcam Video' as the camera in the call app."
+                )
+            else:
+                hint = (
+                    "⚠ DroidCam drivers not found — install them from "
+                    "dev47apps.com, then Device Manager should list "
+                    "'Droidcam Video'. Without them Live falls back to preview only."
+                )
+        else:
+            hint = (
+                "OBS Virtual Camera — works in Zoom/Meet/Discord, but WhatsApp "
+                "Desktop ignores it. Choose DroidCam for WhatsApp."
+            )
+        if getattr(self, "_vcam_hint", None) is not None:
+            self._vcam_hint.configure(text=hint)
+        if persist and backend != (cfg.vcam_backend or "obs"):
+            with suppress(Exception):
+                config.update(vcam_backend=backend)
+
     def _sync_watermark_options(self) -> None:
         """Show the removal-style picker only when watermark removal is on —
         there's nothing to configure when it's off."""
@@ -773,6 +845,7 @@ class SwapGUI(ctk.CTk):
             microphone_device=mic_device,
             voice_output_device=out_device,
             virtual_camera=bool(self._vcam_var.get()) if hasattr(self, "_vcam_var") else True,
+            vcam_backend=self._selected_vcam_backend(),
             remove_watermark=(
                 bool(self._watermark_var.get())
                 if hasattr(self, "_watermark_var")

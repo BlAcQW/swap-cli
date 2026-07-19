@@ -331,6 +331,7 @@ def run(
         camera_device=device,
         record=record,
         virtual_camera=vcam,
+        vcam_backend=cfg.vcam_backend,
         remove_watermark=wm_enabled,
         watermark_template=wm_template,
         watermark_method=cfg.watermark_method,

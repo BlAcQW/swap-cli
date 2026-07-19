@@ -38,6 +38,7 @@ class Display:
         record_path: Path | None = None,
         on_quit: callable = lambda: None,  # type: ignore[assignment]
         virtual_camera: bool = False,
+        vcam_backend: str = "obs",
         watermark: WatermarkRemover | None = None,
         show_window: bool = True,
     ) -> None:
@@ -45,6 +46,12 @@ class Display:
         self._record_path = record_path
         self._on_quit = on_quit
         self._virtual_camera = virtual_camera
+        # Which camera driver receives the frames. "obs" = pyvirtualcam →
+        # OBS Virtual Camera (a DirectShow filter). "droidcam" = DroidCam's real
+        # camera driver, which Media Foundation / Store apps enumerate — notably
+        # WhatsApp Desktop, which refuses DirectShow virtual cameras entirely.
+        self._vcam_backend = vcam_backend
+        self._vcam_kind: str | None = None  # set once a backend actually opens
         # Whether THIS loop owns the cv2 preview window. False on macOS GUI: the
         # session runs on a worker thread and macOS forbids cv2 HighGUI off the
         # main thread, so the GUI pumps the SAME cv2 window from the main thread
@@ -125,9 +132,7 @@ class Display:
                     self._maybe_init_vcam(bgr.shape, fps_guess=20)
                     if self._vcam is not None:
                         try:
-                            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                            self._vcam.send(rgb)
-                            self._vcam.sleep_until_next_frame()
+                            self._send_to_vcam(bgr)
                         except Exception as err:  # noqa: BLE001
                             print(f"[display] vcam send error: {err}", flush=True)
                             # Don't tear the driver down on a single bad frame.
@@ -259,12 +264,28 @@ class Display:
         self._record_path.parent.mkdir(parents=True, exist_ok=True)
         self._writer = cv2.VideoWriter(str(self._record_path), fourcc, fps_guess, (w, h))
 
+    def _send_to_vcam(self, bgr: np.ndarray) -> None:
+        """Hand one frame to whichever camera driver is open.
+
+        DroidCam takes BGR and does its own resize + YUYV packing (it renders at
+        whatever geometry the consuming app asked for). pyvirtualcam wants RGB at
+        the size it was opened with, and paces the loop itself.
+        """
+        if self._vcam_kind == "droidcam":
+            self._vcam.send(bgr)
+            return
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        self._vcam.send(rgb)
+        self._vcam.sleep_until_next_frame()
+
     def _maybe_init_vcam(self, shape: tuple[int, ...], fps_guess: int) -> None:
-        """Open pyvirtualcam.Camera on the first frame so we use the
-        actual stream resolution. Silently no-ops if pyvirtualcam isn't
-        installed or no virtual camera driver is registered — preview
+        """Open the camera output on the first frame so we use the actual stream
+        resolution. Silently no-ops if the driver isn't installed — the preview
         window keeps working in that case."""
         if self._vcam is not None:
+            return
+        if self._vcam_backend == "droidcam":
+            self._init_droidcam()
             return
         try:
             import pyvirtualcam  # type: ignore[import-not-found]
@@ -281,9 +302,13 @@ class Display:
             # backend=None lets pyvirtualcam pick the right one per OS:
             # Windows → OBS Virtual Camera, macOS → OBS, Linux → v4l2loopback.
             self._vcam = pyvirtualcam.Camera(width=w, height=h, fps=fps_guess)
+            self._vcam_kind = "obs"
             print(
                 f"[display] vcam ready: '{self._vcam.device}' "
-                f"{w}x{h}@{fps_guess}fps — Zoom/Meet/Discord can pick it now.",
+                f"{w}x{h}@{fps_guess}fps — Zoom/Meet/Discord can pick it now.\n"
+                "[display] Note: WhatsApp Desktop does NOT accept this camera "
+                "(it ignores DirectShow virtual cameras) — use the DroidCam "
+                "output for WhatsApp.",
                 flush=True,
             )
         except Exception as err:  # noqa: BLE001
@@ -297,6 +322,36 @@ class Display:
                 "https://obsproject.com/download",
                 flush=True,
             )
+
+    def _init_droidcam(self) -> None:
+        """Open DroidCam's shared-memory camera.
+
+        No geometry is passed: unlike pyvirtualcam, the DroidCam driver dictates
+        the resolution (whatever the consuming app requested) and we resize each
+        frame to match, so there's nothing to negotiate up front.
+        """
+        from .droidcam import DroidCamSink, DroidCamUnavailableError
+
+        try:
+            sink = DroidCamSink()
+            sink.open()
+        except DroidCamUnavailableError as err:
+            self._virtual_camera = False
+            self._vcam = None
+            print(
+                f"[display] DroidCam output unavailable: {err}\n"
+                "[display] Install the DroidCam drivers (Device Manager should "
+                "list 'Droidcam Video'), then start the session again.",
+                flush=True,
+            )
+            return
+        self._vcam = sink
+        self._vcam_kind = "droidcam"
+        print(
+            "[display] DroidCam output ready — pick 'Droidcam Video' as your "
+            "camera in WhatsApp/Zoom/Meet. Frames start once an app opens it.",
+            flush=True,
+        )
 
 
 def _tighten_to_badge(crop: np.ndarray) -> np.ndarray:
