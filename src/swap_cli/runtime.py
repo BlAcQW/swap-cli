@@ -218,7 +218,9 @@ async def run_session(opts: RunOptions) -> None:
     from .providers import get_provider
 
     provider = get_provider(getattr(opts, "provider", "decart"))
-    print(f"[runtime] provider={provider.name}", flush=True)
+    # Log the neutral name — the concrete vendor shouldn't appear in output a
+    # managed customer can read. providers/*.name is still the real one.
+    print("[runtime] engine ready", flush=True)
 
     # Managed mode: reserve a metered session and collect the provider token our
     # backend minted. Done BEFORE the camera opens so a customer without credit

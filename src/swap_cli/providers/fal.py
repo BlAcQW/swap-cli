@@ -250,12 +250,12 @@ class FalRealtimeConnection:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # ws closed / decode error → end negotiation
-            self._fail(f"fal signaling error: {err}")
+            self._fail(f"engine signaling error: {err}")
         finally:
             # If the socket closed before we ever reached "connected", unblock
             # connect() with a clear reason instead of hanging until the timeout.
             if not self._done.is_set():
-                self._fail("fal websocket closed during negotiation")
+                self._fail("engine websocket closed during negotiation")
 
     async def _handle(self, msg: Any) -> None:
         if not isinstance(msg, dict):
@@ -263,7 +263,7 @@ class FalRealtimeConnection:
         mtype = msg.get("type")
         if not self._logged_first:
             self._logged_first = True
-            print(f"[runtime] fal signaling: first msg type={mtype!r}", flush=True)
+            print(f"[runtime] engine signaling: first msg type={mtype!r}", flush=True)
 
         if mtype in ("iceservers", "iceServers", "ice_servers"):
             await self._on_iceservers(msg)
@@ -272,32 +272,32 @@ class FalRealtimeConnection:
         elif mtype in ("ice-candidate", "candidate", "iceCandidate"):
             await self._on_candidate(msg)
         elif mtype == "error":
-            self._fail(f"fal error: {msg.get('error') or msg.get('message') or msg}")
+            self._fail(f"engine error: {msg.get('error') or msg.get('message') or msg}")
         else:
             # Status/handshake frames (e.g. the initial {action,timing,type}) —
             # log the type so an unhandled step is nameable, then ignore.
-            print(f"[runtime] fal signaling: ignoring type={mtype!r}", flush=True)
+            print(f"[runtime] engine signaling: ignoring type={mtype!r}", flush=True)
 
     async def _on_iceservers(self, msg: dict[str, Any]) -> None:
         from aiortc import RTCConfiguration, RTCPeerConnection
 
         servers = _ice_servers_from(msg)
-        print(f"[runtime] fal signaling: iceservers ({len(servers)} servers)", flush=True)
-        self._notify("fal: negotiating…")
+        print(f"[runtime] engine signaling: iceservers ({len(servers)} servers)", flush=True)
+        self._notify("engine: negotiating…")
 
         pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
         self._pc = pc
 
         @pc.on("track")
         def _on_track(track: Any) -> None:
-            print(f"[runtime] fal: remote track ({track.kind})", flush=True)
+            print(f"[runtime] engine: remote track ({track.kind})", flush=True)
             if track.kind == "video":
                 self._on_remote_stream(track)
 
         @pc.on("connectionstatechange")
         async def _on_state() -> None:
             st = pc.connectionState
-            print(f"[runtime] fal connection: {st}", flush=True)
+            print(f"[runtime] engine connection: {st}", flush=True)
             self._notify(f"Connection: {st}")
             if st == "connected":
                 self._connected_once = True
@@ -308,7 +308,7 @@ class FalRealtimeConnection:
                     with suppress(Exception):
                         self._quit_event.set()
                 else:
-                    self._fail(f"fal connection {st} before it came up")
+                    self._fail(f"engine connection {st} before it came up")
 
         # sendrecv: our camera goes up, the transformed video returns on the same
         # m-line (mirrors the Decart SDK's addTrack-only setup).
@@ -317,7 +317,7 @@ class FalRealtimeConnection:
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
         await self._signal_send({"type": "offer", "sdp": pc.localDescription.sdp})
-        print("[runtime] fal signaling: offer sent", flush=True)
+        print("[runtime] engine signaling: offer sent", flush=True)
 
     async def _on_answer(self, msg: dict[str, Any]) -> None:
         from aiortc import RTCSessionDescription
@@ -326,7 +326,7 @@ class FalRealtimeConnection:
         if not sdp or self._pc is None:
             return
         await self._pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
-        print("[runtime] fal signaling: answer received", flush=True)
+        print("[runtime] engine signaling: answer received", flush=True)
         # Flush any ICE candidates that arrived before the remote description.
         for cand in self._ice_queue:
             with suppress(Exception):
@@ -337,7 +337,7 @@ class FalRealtimeConnection:
         try:
             candidate = _parse_ice_candidate(msg.get("candidate"))
         except Exception as err:
-            print(f"[runtime] fal: skipping bad ICE candidate ({err})", flush=True)
+            print(f"[runtime] engine: skipping bad ICE candidate ({err})", flush=True)
             return
         if candidate is None:
             return
@@ -420,18 +420,18 @@ class FalProvider:
             import websockets
         except ImportError as err:  # pragma: no cover - depends on install extras
             raise RuntimeError(
-                "The fal provider needs aiortc + websockets + msgpack. Run:  "
+                "The engine needs aiortc + websockets + msgpack. Run:  "
                 "pip install aiortc websockets msgpack"
             ) from err
 
         if managed_token:
             token = managed_token
         else:
-            notify("fal: fetching token…")
+            notify("engine: fetching token…")
             token = await _fetch_realtime_token(key, _app_alias(app_id))
-        notify("fal: connecting…")
+        notify("engine: connecting…")
         ws = await websockets.connect(_realtime_url(app_id, token), max_size=None)
-        print(f"[runtime] fal realtime websocket open · {app_id}", flush=True)
+        print("[runtime] engine realtime websocket open", flush=True)
 
         conn = FalRealtimeConnection(
             ws=ws,
@@ -450,14 +450,24 @@ class FalProvider:
             )
         except TimeoutError as exc:
             await conn.cleanup()
+            causes = [
+                "  • Firewall blocking UDP — realtime video needs UDP traversal "
+                "for WebRTC ICE.",
+                "  • You just ended a previous session — wait ~15s and retry.",
+            ]
+            if not managed_token:
+                # BYOK only: their own key and credit ARE plausible causes, and
+                # naming the vendor is correct — that account is theirs. A
+                # managed customer has no key, so this advice would just send
+                # them looking for one.
+                causes.insert(
+                    1,
+                    "  • fal API key invalid or out of credits — verify it at "
+                    "https://fal.ai/dashboard.",
+                )
             raise RuntimeError(
-                f"fal connection timed out after {FAL_CONNECT_TIMEOUT_S:.0f}s.\n"
-                "Common causes:\n"
-                "  • Firewall blocking UDP — fal's realtime API needs UDP "
-                "traversal for WebRTC ICE.\n"
-                "  • fal API key invalid or out of credits — verify it at "
-                "https://fal.ai/dashboard.\n"
-                "  • You just ended a previous session — wait ~15s and retry."
+                f"engine connection timed out after {FAL_CONNECT_TIMEOUT_S:.0f}s.\n"
+                "Common causes:\n" + "\n".join(causes)
             ) from exc
         except Exception:
             await conn.cleanup()

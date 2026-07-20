@@ -185,21 +185,25 @@ def show_config() -> None:
     table.add_row("config path", str(config.config_path()))
     table.add_row("license key", _redact(cfg.license_key) or "[red]not set[/red]")
     table.add_row("billing", "prepaid credits" if cfg.is_managed else "own API key")
-    table.add_row("provider", cfg.provider)
-    # Either provider key is enough, so a missing one is only dim — not red.
-    table.add_row("decart api key", _redact(cfg.decart_api_key) or "[dim]not set[/dim]")
-    table.add_row("fal api key", _redact(cfg.fal_api_key) or "[dim]not set[/dim]")
     if cfg.is_managed:
-        pass  # no provider key expected — the server mints per-session tokens
-    elif not cfg.has_provider_key:
-        table.add_row("backend", "[red]✗ no API key — add one in ⚙ Settings[/red]")
-    elif not _provider_key_for(cfg):
-        # Key on file, but for the OTHER backend — the mismatch that only shows
-        # up when you hit Live. Surface it here, same as doctor does.
-        table.add_row(
-            "backend",
-            f"[red]✗ provider is '{cfg.provider}' but its key isn't set[/red]",
-        )
+        # A managed customer holds no provider key and doesn't choose a backend —
+        # showing the provider name and empty key rows would both leak the vendor
+        # and confuse. Credit is what matters to them, and doctor reports it.
+        pass
+    else:
+        table.add_row("provider", cfg.provider)
+        # Either provider key is enough, so a missing one is only dim — not red.
+        table.add_row("decart api key", _redact(cfg.decart_api_key) or "[dim]not set[/dim]")
+        table.add_row("fal api key", _redact(cfg.fal_api_key) or "[dim]not set[/dim]")
+        if not cfg.has_provider_key:
+            table.add_row("backend", "[red]✗ no API key — add one in ⚙ Settings[/red]")
+        elif not _provider_key_for(cfg):
+            # Key on file, but for the OTHER backend — the mismatch that only
+            # shows up when you hit Live. Surface it here, same as doctor does.
+            table.add_row(
+                "backend",
+                f"[red]✗ provider is '{cfg.provider}' but its key isn't set[/red]",
+            )
     table.add_row("machine id", config.machine_id())
     if cfg.license_cached_valid_until is not None:
         table.add_row(
