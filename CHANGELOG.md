@@ -5,6 +5,38 @@ All notable changes to swap-cli.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.6] — 2026-07-20 — managed credit + Windows installer
+
+The first release that carries the managed-credits work. Until now the only
+published build (0.1.5) was bring-your-own-key; everything below shipped on
+`main` but never reached PyPI.
+
+### Added
+
+- **Managed mode** — buy prepaid credit instead of holding a provider API key.
+  `swap redeem CODE` claims a voucher; the GUI and `swap` show remaining credit
+  as **minutes**, not tokens. Sessions are metered server-side against your
+  balance, so a silent client can't run up the bill.
+- **fal.ai as a switchable realtime engine** (`--provider fal`) alongside Decart,
+  selectable before going Live.
+- **DroidCam virtual-camera output** — the one virtual camera WhatsApp actually
+  accepts, so the swapped feed shows up in a WhatsApp video call.
+- **Windows `.exe`** on the [Releases page](https://github.com/BlAcQW/swap-cli/releases)
+  — a double-click desktop build for people who don't have Python. Built by the
+  new `build-windows.yml` workflow on each tag.
+
+### Changed
+
+- The licence is now enforced **before** a session starts, and revoking a licence
+  takes effect immediately.
+- Licence failures are shown in plain English instead of a raw server code.
+- Managed customers never see the underlying vendor's name in the UI.
+
+### Fixed
+
+- The machine id is now stable across restarts, so a single install no longer
+  burns through its machine seats.
+
 ## [0.1.1] — 2026-06-XX — first PyPI release
 
 First public release on PyPI. `pip install swap-cli` now works.

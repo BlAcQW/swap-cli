@@ -1,0 +1,71 @@
+name: Build Windows exe
+
+# Two triggers:
+#   * a v* tag  -> build the exe and attach it to that tag's GitHub Release,
+#     so release.yml (PyPI) and this (the .exe) land on the same release.
+#   * manual    -> workflow_dispatch, to test the build without cutting a tag;
+#     the artifact is uploaded to the run instead of a release.
+#
+# Security note: the only expression interpolations below are trusted,
+# maintainer-controlled values (the git ref / tag name and an ASSET name we
+# derive from it). No issue/PR/comment text is ever interpolated into a run
+# step, so there is no workflow-injection surface here.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to upload the exe as a Release asset
+
+jobs:
+  build-windows:
+    name: PyInstaller onefile (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the app + PyInstaller
+        # Base install only -- the `voice` extra (torch, ~3 GB) is deliberately
+        # left out so the exe stays small.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+          python -m pip install "pyinstaller>=6.3"
+
+      - name: Build swap-cli.exe
+        run: pyinstaller packaging/swap-gui.spec --noconfirm --clean
+
+      - name: Name the artifact with the version
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          ver="$REF_NAME"
+          [ "$EVENT_NAME" = "workflow_dispatch" ] && ver="dev"
+          # keep only safe filename characters from the tag name
+          ver="$(printf '%s' "$ver" | tr -cd 'A-Za-z0-9._-')"
+          cp "dist/swap-cli.exe" "swap-cli-${ver}-windows-x64.exe"
+          echo "ASSET=swap-cli-${ver}-windows-x64.exe" >> "$GITHUB_ENV"
+
+      # Manual runs: keep the exe as a downloadable run artifact.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: swap-cli-windows-x64
+          path: ${{ env.ASSET }}
+
+      # Tag runs: publish the exe onto the GitHub Release for that tag.
+      - name: Attach exe to the Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}

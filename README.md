@@ -75,6 +75,16 @@ recording to a file or for the preview window.
 
 ## 1 — Install
 
+Two ways, depending on whether you have Python:
+
+**A. Windows, no Python — download the app.** Grab the latest
+`swap-cli-vX.Y.Z-windows-x64.exe` from the
+[Releases page](https://github.com/BlAcQW/swap-cli/releases) and double-click it.
+Nothing to install; it opens straight into the GUI. This is the path for most
+managed-credit customers.
+
+**B. Any OS, with Python — install from PyPI.**
+
 ```bash
 pip install swap-cli
 ```

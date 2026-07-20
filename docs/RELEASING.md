@@ -31,17 +31,36 @@ re-create the PyPI publisher binding if it's ever lost.
    git tag vX.Y.Z
    git push origin main vX.Y.Z
    ```
-5. Watch the `Publish to PyPI` workflow run at
-   https://github.com/BlAcQW/swap-cli/actions/workflows/release.yml.
-   It will:
-   - Check out the tag
-   - Run the test suite
-   - Build wheel + sdist with `python -m build`
-   - Upload to PyPI via OIDC
-6. Verify the package appears at
-   https://pypi.org/project/swap-cli/X.Y.Z/.
-7. Draft a GitHub Release on the tag, paste the CHANGELOG section as
-   the body so users see the same notes on GitHub.
+5. The **same tag** fires two workflows in parallel:
+   - `Publish to PyPI` (`release.yml`) —
+     https://github.com/BlAcQW/swap-cli/actions/workflows/release.yml.
+     Checks out the tag, runs the tests, builds wheel + sdist with
+     `python -m build`, uploads to PyPI via OIDC.
+   - `Build Windows exe` (`build-windows.yml`) —
+     https://github.com/BlAcQW/swap-cli/actions/workflows/build-windows.yml.
+     On `windows-latest`, installs the base package + PyInstaller, builds a
+     onefile `swap-cli.exe` from `packaging/swap-gui.spec`, and attaches
+     `swap-cli-vX.Y.Z-windows-x64.exe` to the tag's GitHub Release.
+6. Verify:
+   - The package appears at https://pypi.org/project/swap-cli/X.Y.Z/.
+   - The `.exe` is attached to the release at
+     https://github.com/BlAcQW/swap-cli/releases/tag/vX.Y.Z.
+7. Draft/confirm the GitHub Release on the tag, paste the CHANGELOG section as
+   the body so users see the same notes on GitHub. (`softprops/action-gh-release`
+   creates the release if it doesn't exist yet when it attaches the exe — edit
+   it to add the notes.)
+
+### The Windows exe
+
+- The build is defined by `packaging/swap-gui.spec` (onefile, `console=True`,
+  launches the GUI via `packaging/entry_gui.py`). The `voice` extra is excluded
+  so the exe stays small.
+- It is **built on Windows only** — PyInstaller does not cross-compile, so this
+  cannot be produced from the Linux/Mac dev box. To smoke-test the spec without
+  cutting a tag, run the workflow manually (Actions → *Build Windows exe* →
+  *Run workflow*); the exe lands as a run artifact instead of a release asset.
+- First proven run: flip `console=True` → `False` in the spec once you've
+  confirmed the GUI opens cleanly, so customers don't see a console window.
 
 ## Verifying locally before release
 
