@@ -116,5 +116,43 @@ def test_apply_decart_key_update_rejects_short_key(monkeypatch) -> None:
     assert called == []
 
 
+def test_apply_license_key_update_persists(monkeypatch) -> None:
+    """A valid key triggers config.update with the cache-reset fields, so the
+    next launch re-validates and re-learns managed vs byok mode."""
+    captured: dict = {}
+    monkeypatch.setattr(gui.config, "update", lambda **kw: captured.update(kw))
+
+    gui.apply_license_key_update("  SWAP-CLI-7K3M-9PQR-XW4T  ")
+    assert captured["license_key"] == "SWAP-CLI-7K3M-9PQR-XW4T"  # trimmed
+    assert captured["license_cached_at"] is None
+    assert captured["license_cached_valid_until"] is None
+
+
+def test_apply_license_key_update_accepts_lowercase_prefix(monkeypatch) -> None:
+    """Prefix check is case-insensitive — a paste in any case still saves."""
+    captured: dict = {}
+    monkeypatch.setattr(gui.config, "update", lambda **kw: captured.update(kw))
+    gui.apply_license_key_update("swap-cli-abcd-efgh")
+    assert captured["license_key"] == "swap-cli-abcd-efgh"
+
+
+def test_apply_license_key_update_rejects_bad_prefix(monkeypatch) -> None:
+    """Missing 'SWAP-CLI-' prefix → error + config.update NOT called."""
+    called = []
+    monkeypatch.setattr(gui.config, "update", lambda **kw: called.append(kw))
+    with pytest.raises(gui.LicenseKeyValidationError):
+        gui.apply_license_key_update("dct_this_is_a_provider_key_not_a_licence")
+    assert called == []
+
+
+def test_apply_license_key_update_rejects_short_key(monkeypatch) -> None:
+    """Truncated paste (< 14 chars) → error + config.update NOT called."""
+    called = []
+    monkeypatch.setattr(gui.config, "update", lambda **kw: called.append(kw))
+    with pytest.raises(gui.LicenseKeyValidationError):
+        gui.apply_license_key_update("SWAP-CLI-")
+    assert called == []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

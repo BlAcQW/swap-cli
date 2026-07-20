@@ -17,6 +17,11 @@ published build (0.1.5) was bring-your-own-key; everything below shipped on
   `swap redeem CODE` claims a voucher; the GUI and `swap` show remaining credit
   as **minutes**, not tokens. Sessions are metered server-side against your
   balance, so a silent client can't run up the bill.
+- **Self-serve licence entry in the GUI** — the licence key is now an editable
+  field in ⚙ Settings, and a first launch with no key opens Settings straight
+  away. This is what makes the Windows `.exe` self-sufficient: a customer with no
+  Python (so no `swap setup`) can paste their key and redeem a voucher entirely
+  in the window.
 - **fal.ai as a switchable realtime engine** (`--provider fal`) alongside Decart,
   selectable before going Live.
 - **DroidCam virtual-camera output** — the one virtual camera WhatsApp actually

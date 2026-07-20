@@ -43,6 +43,8 @@ htmlcov/
 
 # Build outputs
 *.spec
+# ...but our hand-maintained PyInstaller spec IS source and must be tracked.
+!packaging/swap-gui.spec
 *.exe
 *.app
 PyInstaller/

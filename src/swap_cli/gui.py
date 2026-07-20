@@ -89,6 +89,39 @@ def apply_decart_key_update(new_key: str) -> None:
     )
 
 
+class LicenseKeyValidationError(ValueError):
+    """Raised when a candidate licence key fails basic format checks."""
+
+
+def apply_license_key_update(new_key: str) -> None:
+    """Validate + persist a new swap-cli licence key.
+
+    This is what makes the packaged .exe self-sufficient: a user with no Python
+    (so no `swap setup`) can paste their key straight into ⚙ Settings. Loose
+    validation only — the server is the real authority. We catch obvious typos
+    (empty, missing prefix, truncated paste) so we don't save junk that then
+    fails every launch with an opaque error.
+
+    Side effects on success:
+      - config.update(license_key=<new>, license_cached_at=None,
+        license_cached_valid_until=None) — clearing the cache forces the next
+        launch to re-validate the new key (and re-learn managed vs byok mode)
+        against the server.
+    """
+    trimmed = (new_key or "").strip()
+    if not trimmed.upper().startswith("SWAP-CLI-"):
+        raise LicenseKeyValidationError("Licence key must start with 'SWAP-CLI-'.")
+    if len(trimmed) < 14:
+        raise LicenseKeyValidationError(
+            f"Licence key looks too short ({len(trimmed)} chars) — check the paste."
+        )
+    config.update(
+        license_key=trimmed,
+        license_cached_at=None,
+        license_cached_valid_until=None,
+    )
+
+
 class SwapGUI(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -660,8 +693,19 @@ class SwapGUI(ctk.CTk):
 
     def _refresh_status(self) -> None:
         cfg = config.load()
+        if not cfg.license_key:
+            self._status_var.set("⚠ Enter your licence key in ⚙ Settings to begin.")
+            # First run with no key (the .exe case — there's no `swap setup` for
+            # a user without Python): open Settings once so they have somewhere
+            # to paste it.
+            if not getattr(self, "_prompted_for_license", False):
+                self._prompted_for_license = True
+                self.after(400, self._on_settings_clicked)
+            return
         if not cfg.is_complete:
-            self._status_var.set("⚠ Run `swap setup` first to save your license + Decart key.")
+            self._status_var.set(
+                "⚠ Add your backend API key in ⚙ Settings before going live."
+            )
 
     def _selected_camera(self) -> CameraDevice | None:
         label = self._camera_var.get()
@@ -1825,7 +1869,9 @@ class _SettingsModal(ctk.CTkToplevel):
             anchor="w",
         ).pack(fill="x", pady=(0, 10))
 
-        # ── License key (read-only) ────────────────────────────────────
+        # ── License key (editable) ─────────────────────────────────────
+        # Editable so the packaged .exe is self-sufficient: a user with no
+        # Python (no `swap setup`) pastes their key here to onboard.
         license_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
         license_frame.pack(fill="x", pady=(0, 12))
         ctk.CTkLabel(
@@ -1837,17 +1883,26 @@ class _SettingsModal(ctk.CTkToplevel):
         ).pack(fill="x", padx=14, pady=(10, 0))
         ctk.CTkLabel(
             license_frame,
-            text=_redact_key(cfg.license_key),
-            font=ctk.CTkFont(size=13),
-            anchor="w",
-        ).pack(fill="x", padx=14, pady=(2, 4))
-        ctk.CTkLabel(
-            license_frame,
-            text="Bought from swap.storelygh.com — rotate by contacting support.",
+            text="Paste the key you bought from swap.storelygh.com, then Save.",
             font=ctk.CTkFont(size=10),
             text_color="#6b7280",
             anchor="w",
-        ).pack(fill="x", padx=14, pady=(0, 10))
+        ).pack(fill="x", padx=14, pady=(2, 4))
+        self._license_var = tk.StringVar(value=cfg.license_key or "")
+        ctk.CTkEntry(
+            license_frame,
+            textvariable=self._license_var,
+            placeholder_text="SWAP-CLI-…",
+        ).pack(fill="x", padx=14, pady=(0, 4))
+        license_row = ctk.CTkFrame(license_frame, fg_color="transparent")
+        license_row.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkButton(
+            license_row, text="Save", width=90, command=self._on_save_license
+        ).pack(side="left")
+        self._license_status = ctk.CTkLabel(
+            license_row, text="", anchor="w", font=ctk.CTkFont(size=11)
+        )
+        self._license_status.pack(side="left", padx=(8, 0))
 
         # ── Prepaid credit (managed licences only) ─────────────────────
         self._credit_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
@@ -2100,6 +2155,31 @@ class _SettingsModal(ctk.CTkToplevel):
             )
             return
         self.after(0, lambda: self._credit_balance.configure(text=bal.label))
+
+    def _on_save_license(self) -> None:
+        """Persist a pasted licence key so a no-Python .exe user can onboard
+        without `swap setup`. Then kick the parent to re-validate the key and
+        refresh credit, so the managed rows (credit + redeem) appear without
+        reopening Settings."""
+        key = (self._license_var.get() or "").strip()
+        try:
+            apply_license_key_update(key)
+        except LicenseKeyValidationError as err:
+            self._license_status.configure(text=str(err), text_color="#ef4444")
+            return
+        except Exception as err:  # surface, never crash the modal
+            self._license_status.configure(
+                text=f"Save failed: {err}", text_color="#ef4444"
+            )
+            return
+        self._license_status.configure(text="Saved ✓", text_color="#22c55e")
+        with suppress(Exception):
+            threading.Thread(
+                target=self._parent._check_license_async, daemon=True
+            ).start()
+            threading.Thread(
+                target=self._parent._refresh_credit_async, daemon=True
+            ).start()
 
     def _on_redeem(self) -> None:
         code = (self._voucher_var.get() or "").strip()
