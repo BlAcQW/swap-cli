@@ -59,6 +59,9 @@ class Config:
     # template matching misses. On by default (bullet-proofing); flip off if it
     # ever covers a non-badge region.
     watermark_signature_fallback: bool = True
+    # Device identifier sent with every licence check. Persisted rather than
+    # recomputed — see machine_id() for why a hardware-derived value drifts.
+    machine_id: str | None = None
     # Sprint 18: realtime backend — "decart" (default) or "fal". fal resells the
     # same Decart Lucy model on its own account, so it's both a second source and
     # a possible way around Decart's watermark (which they refuse to lift for us).
@@ -118,6 +121,7 @@ def load() -> Config:
         watermark_inpaint_radius=_int_or_none(data.get("watermark_inpaint_radius")) or 3,
         watermark_template_width=_int_or_none(data.get("watermark_template_width")),
         watermark_signature_fallback=bool(data.get("watermark_signature_fallback", True)),
+        machine_id=_clean(data.get("machine_id")),
         provider=_clean(data.get("provider")) or "decart",
         vcam_backend=_clean(data.get("vcam_backend")) or "obs",
         fal_api_key=_clean(data.get("fal_api_key")),
@@ -166,6 +170,8 @@ def save(cfg: Config) -> Path:
         body.append(f"watermark_template_width = {cfg.watermark_template_width}")
     if not cfg.watermark_signature_fallback:  # only persist the non-default (off)
         body.append("watermark_signature_fallback = false")
+    if cfg.machine_id:
+        body.append(f'machine_id = "{_escape(cfg.machine_id)}"')
     if cfg.provider and cfg.provider != "decart":
         body.append(f'provider = "{_escape(cfg.provider)}"')
     if cfg.vcam_backend and cfg.vcam_backend != "obs":
@@ -212,6 +218,7 @@ def update(**kwargs: Any) -> Config:
         watermark_signature_fallback=kwargs.get(
             "watermark_signature_fallback", current.watermark_signature_fallback
         ),
+        machine_id=kwargs.get("machine_id", current.machine_id),
         provider=kwargs.get("provider", current.provider),
         vcam_backend=kwargs.get("vcam_backend", current.vcam_backend),
         fal_api_key=kwargs.get("fal_api_key", current.fal_api_key),
@@ -220,10 +227,42 @@ def update(**kwargs: Any) -> Config:
     return merged
 
 
-def machine_id() -> str:
-    """Stable, hashed device identifier. Never sends raw MAC/serial off-device."""
+def _derive_machine_id() -> str:
+    """Hash the machine's identifying traits. Never sends raw MAC/serial off-device."""
     raw = f"{uuid.getnode()}|{platform.node()}|{platform.machine()}|{platform.system()}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def machine_id() -> str:
+    """Stable device identifier, persisted on first use.
+
+    It used to be derived from hardware on every call, which is NOT stable:
+    `uuid.getnode()` returns a *random* value whenever it can't read a real MAC,
+    and it changes when network adapters come and go (installing a virtual
+    camera driver or connecting a VPN is enough). `platform.node()` is the
+    hostname, which changes on rename.
+
+    That mattered because the licence server registers each new id against the
+    licence and refuses once `maxMachines` is exceeded — so a drifting id
+    silently burned seats until validation started failing with
+    `too_many_machines`. Once prepaid credit is attached to a licence key, the
+    same drift would lock a customer out of balance they paid for.
+
+    We persist the value the first time we're asked. On an existing install that
+    freezes whatever the server has *already* registered, so upgrading doesn't
+    consume another seat; a fresh install simply freezes whatever it starts with.
+    Best-effort: if the config can't be written we still return a usable id.
+    """
+    cfg = load()
+    if cfg.machine_id:
+        return cfg.machine_id
+
+    derived = _derive_machine_id()
+    try:
+        update(machine_id=derived)
+    except OSError as err:  # read-only config dir, permissions, disk full…
+        print(f"[config] could not persist machine_id: {err}", file=sys.stderr)
+    return derived
 
 
 def _clean(value: Any) -> str | None:

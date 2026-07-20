@@ -43,6 +43,15 @@ _REASON_TEXT = {
     "revoked": "revoked — contact support",
     "not_found": "not recognised — check the key with `swap setup`",
     "machine_limit": "already in use on another machine",
+    # The codes the backend actually returns (services/licenses.ts).
+    "license_not_found": "not recognised — check the key with `swap setup`",
+    "license_revoked": "revoked — contact support",
+    "license_expired": "expired — renew to keep using swap-cli",
+    "invalid_format": "doesn't look like a valid key — check it with `swap setup`",
+    "too_many_machines": (
+        "already activated on the maximum number of machines for this licence. "
+        "Remove an old machine (or ask support to), then try again"
+    ),
 }
 
 _HTTP_TEXT = {
@@ -55,6 +64,29 @@ _HTTP_TEXT = {
     404: "the license service wasn't found — update swap-cli (`pip install -U swap-cli`)",
     429: "too many checks in a row — wait a minute and try again",
 }
+
+
+def _reason_from_body(response: httpx.Response) -> str | None:
+    """Pull the machine-readable cause out of a failed response, or None.
+
+    The backend's failure envelope is `{"success": false, "error": "<code>",
+    "details": {"reason": "<code>"}}`. Never raises — a proxy or CDN can return
+    HTML here, and a broken error path must not mask the original failure.
+    """
+    try:
+        body = response.json()
+    except Exception:  # non-JSON body is expected here, not exceptional
+        return None
+    if not isinstance(body, dict):
+        return None
+    details = body.get("details")
+    if isinstance(details, dict) and isinstance(details.get("reason"), str):
+        return details["reason"]
+    for key in ("error", "reason", "message"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def explain(reason: str) -> str:
@@ -128,7 +160,14 @@ async def validate(*, force_online: bool = False) -> LicenseStatus:
         raise LicenseError(f"License server unreachable: {err}") from err
 
     if response.status_code != 200:
-        return LicenseStatus(valid=False, reason=f"http_{response.status_code}")
+        # The backend puts the real cause in the body — `fail(403, reason, {reason})`
+        # — so a bare "http_403" told the user nothing while the answer was sitting
+        # in the response we discarded. Prefer the server's code, fall back to the
+        # status so an HTML error page or empty body still says something.
+        return LicenseStatus(
+            valid=False,
+            reason=_reason_from_body(response) or f"http_{response.status_code}",
+        )
 
     body = response.json()
     if not body.get("success"):

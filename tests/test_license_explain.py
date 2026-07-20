@@ -61,6 +61,57 @@ def test_unknown_http_code_still_reads_as_english() -> None:
     assert "418" in text  # keep the number for support/debugging
 
 
+@pytest.mark.parametrize(
+    "reason,expected",
+    [
+        ("license_not_found", "not recognised"),
+        ("license_revoked", "revoked"),
+        ("license_expired", "expired"),
+        ("invalid_format", "valid key"),
+        ("too_many_machines", "maximum number of machines"),
+    ],
+)
+def test_real_backend_codes_are_translated(reason: str, expected: str) -> None:
+    """These are the exact codes services/licenses.ts returns — they reach the
+    user through a 403 body, so they must not surface as raw snake_case."""
+    text = license.explain(reason)
+    assert expected in text
+    assert reason not in text
+
+
+class _Resp:
+    def __init__(self, payload, *, raises=False):
+        self._payload = payload
+        self._raises = raises
+
+    def json(self):
+        if self._raises:
+            raise ValueError("not JSON")
+        return self._payload
+
+
+def test_reason_is_read_from_the_details_field() -> None:
+    """The backend's envelope is {success, error, details:{reason}} — the
+    details.reason is the authoritative code."""
+    resp = _Resp({"success": False, "error": "too_many_machines",
+                  "details": {"reason": "too_many_machines"}})
+    assert license._reason_from_body(resp) == "too_many_machines"
+
+
+def test_reason_falls_back_to_the_error_field() -> None:
+    assert license._reason_from_body(_Resp({"success": False, "error": "rate_limited"})) == (
+        "rate_limited"
+    )
+
+
+def test_non_json_body_yields_none_so_the_status_code_is_used() -> None:
+    """A proxy/CDN can return HTML here. A broken error path must not mask the
+    original failure — we fall back to http_<status>."""
+    assert license._reason_from_body(_Resp(None, raises=True)) is None
+    assert license._reason_from_body(_Resp("just a string")) is None
+    assert license._reason_from_body(_Resp({"success": False})) is None
+
+
 def test_backend_supplied_text_passes_through_untouched() -> None:
     """The server may send its own message — that's more useful than anything
     we'd substitute, so don't mangle it."""
