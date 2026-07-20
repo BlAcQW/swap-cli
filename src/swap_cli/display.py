@@ -41,11 +41,17 @@ class Display:
         vcam_backend: str = "obs",
         watermark: WatermarkRemover | None = None,
         show_window: bool = True,
+        on_first_frame: callable | None = None,  # type: ignore[valid-type]
     ) -> None:
         self._track = track
         self._record_path = record_path
         self._on_quit = on_quit
         self._virtual_camera = virtual_camera
+        # Fired once, when a frame has actually been decoded. Managed mode
+        # starts BILLING here: the backend's first tick stamps the start and
+        # charges nothing, so hooking anything earlier (the track arriving,
+        # say) would start the customer's clock before they see a picture.
+        self._on_first_frame = on_first_frame
         # Which camera driver receives the frames. "obs" = pyvirtualcam →
         # OBS Virtual Camera (a DirectShow filter). "droidcam" = DroidCam's real
         # camera driver, which Media Foundation / Store apps enumerate — notably
@@ -116,6 +122,10 @@ class Display:
                 frame = await self._track.recv()
                 bgr = frame.to_ndarray(format="bgr24")
                 self._latest_raw_bgr = bgr  # keep the un-cleaned frame for W capture
+                if self._on_first_frame is not None:
+                    callback, self._on_first_frame = self._on_first_frame, None
+                    with suppress(Exception):  # never let a hook kill the stream
+                        callback()
                 # Sprint 15: strip the Decart watermark before anything
                 # downstream sees the frame. process() never raises — it
                 # returns the frame unchanged on any failure.

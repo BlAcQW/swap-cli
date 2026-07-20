@@ -72,12 +72,30 @@ class Config:
     # apps enumerate, so WhatsApp accepts it. Windows only.
     vcam_backend: str = "obs"
     fal_api_key: str | None = None
+    # How this licence pays for compute, as reported by the licence server:
+    # "byok" = the user's own API key, "managed" = prepaid credit we meter.
+    # Cached from the last validation so the UI can render correctly before the
+    # first network round-trip; the server remains the authority.
+    license_mode: str = "byok"
+
+    @property
+    def is_managed(self) -> bool:
+        """True when compute is billed against prepaid credit rather than the
+        user's own API key."""
+        return (self.license_mode or "byok").strip().lower() == "managed"
 
     @property
     def has_provider_key(self) -> bool:
-        """True when at least one realtime backend is usable. `swap setup` only
-        collects the license; the provider key is set in ⚙ Settings (or via
-        `swap setup --fal-key/--decart-key`), and either provider is enough."""
+        """True when a realtime backend is usable.
+
+        A managed licence has NO provider key by design — that's the whole point,
+        the key is ours and the server mints per-session tokens. Without the
+        managed branch here `is_complete` is False for every managed customer,
+        and they're turned away at the Live button with "run `swap setup`"
+        before any credit check can run.
+        """
+        if self.is_managed:
+            return True
         return bool(self.decart_api_key) or bool(self.fal_api_key)
 
     @property
@@ -125,6 +143,7 @@ def load() -> Config:
         provider=_clean(data.get("provider")) or "decart",
         vcam_backend=_clean(data.get("vcam_backend")) or "obs",
         fal_api_key=_clean(data.get("fal_api_key")),
+        license_mode=_clean(data.get("license_mode")) or "byok",
     )
 
 
@@ -178,6 +197,8 @@ def save(cfg: Config) -> Path:
         body.append(f'vcam_backend = "{_escape(cfg.vcam_backend)}"')
     if cfg.fal_api_key:
         body.append(f'fal_api_key = "{_escape(cfg.fal_api_key)}"')
+    if cfg.license_mode and cfg.license_mode != "byok":
+        body.append(f'license_mode = "{_escape(cfg.license_mode)}"')
 
     text = "\n".join(body) + "\n"
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -222,6 +243,7 @@ def update(**kwargs: Any) -> Config:
         provider=kwargs.get("provider", current.provider),
         vcam_backend=kwargs.get("vcam_backend", current.vcam_backend),
         fal_api_key=kwargs.get("fal_api_key", current.fal_api_key),
+        license_mode=kwargs.get("license_mode", current.license_mode),
     )
     save(merged)
     return merged

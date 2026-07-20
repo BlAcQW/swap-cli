@@ -398,11 +398,17 @@ class FalProvider:
         notify: Callable[[str], None],
         quit_event: Any,
     ) -> _FalSession:
+        # Managed mode: the backend already minted a token against OUR account
+        # and handed it over, so there is no local key to look for. Falling back
+        # to the BYOK path keeps that flow byte-for-byte unchanged.
+        managed_token = (getattr(opts, "managed_token", "") or "").strip()
+        app_id = (getattr(opts, "managed_app", "") or "").strip() or self.app_id
+
         # Validate config BEFORE touching dependencies, so a missing key reports
         # the missing key — not an import error that sends the user down the
         # wrong path.
         key = (getattr(opts, "fal_api_key", "") or "").strip()
-        if not key:
+        if not managed_token and not key:
             raise RuntimeError(
                 "No fal API key set. Get one at https://fal.ai/dashboard/keys, then "
                 "run `swap setup` (or set it in ⚙ Settings)."
@@ -418,11 +424,14 @@ class FalProvider:
                 "pip install aiortc websockets msgpack"
             ) from err
 
-        notify("fal: fetching token…")
-        token = await _fetch_realtime_token(key, _app_alias(self.app_id))
+        if managed_token:
+            token = managed_token
+        else:
+            notify("fal: fetching token…")
+            token = await _fetch_realtime_token(key, _app_alias(app_id))
         notify("fal: connecting…")
-        ws = await websockets.connect(_realtime_url(self.app_id, token), max_size=None)
-        print(f"[runtime] fal realtime websocket open · {self.app_id}", flush=True)
+        ws = await websockets.connect(_realtime_url(app_id, token), max_size=None)
+        print(f"[runtime] fal realtime websocket open · {app_id}", flush=True)
 
         conn = FalRealtimeConnection(
             ws=ws,

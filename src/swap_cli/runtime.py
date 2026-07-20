@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -101,6 +101,12 @@ class RunOptions:
     # separate Decart account, so its watermark policy may differ.
     provider: str = "decart"
     fal_api_key: str = ""
+    # Managed mode: a provider token minted by our backend against OUR account,
+    # plus the app it's scoped to. Set by run_session after opening a metered
+    # session — never by the caller. When present the provider uses it instead of
+    # looking for a local API key.
+    managed_token: str = ""
+    managed_app: str = ""
 
 
 async def _require_valid_license(notify: Callable[[str], None]) -> None:
@@ -135,6 +141,43 @@ async def _require_valid_license(notify: Callable[[str], None]) -> None:
             "Buy or renew at https://swap.storelygh.com"
         )
     print(f"[runtime] license ok ({status.reason})", flush=True)
+
+
+async def _managed_heartbeat(
+    session_id: str,
+    interval: int,
+    notify: Callable[[str], None],
+    quit_event: asyncio.Event,
+) -> None:
+    """Meter a managed session until it ends.
+
+    Sends no duration — the server derives elapsed time from its own clock, so a
+    patched client can't under-report. Our only job is to keep checking in and to
+    stop the session when the server says the credit is gone.
+
+    Errors are swallowed and retried: a transient blip shouldn't kill a live call.
+    The server closes an abandoned session on its own heartbeat timeout, so a
+    client that goes quiet stops costing the customer money regardless.
+    """
+    from . import credits
+
+    while not quit_event.is_set():
+        try:
+            await asyncio.sleep(interval)
+            if quit_event.is_set():
+                return
+            tick = await credits.session_tick(session_id)
+            if tick.should_disconnect:
+                notify(
+                    "Out of credit — session ending. Redeem a voucher to continue."
+                )
+                print("[runtime] managed: credit exhausted, stopping", flush=True)
+                quit_event.set()
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # a transient blip must not end the call
+            print(f"[runtime] managed: heartbeat failed ({err}); retrying", flush=True)
 
 
 async def run_session(opts: RunOptions) -> None:
@@ -177,6 +220,36 @@ async def run_session(opts: RunOptions) -> None:
     provider = get_provider(getattr(opts, "provider", "decart"))
     print(f"[runtime] provider={provider.name}", flush=True)
 
+    # Managed mode: reserve a metered session and collect the provider token our
+    # backend minted. Done BEFORE the camera opens so a customer without credit
+    # is turned away without their webcam ever being grabbed. Nothing is charged
+    # here — billing starts on the first frame.
+    managed: Any = None
+    from . import config as _config
+
+    if _config.load().is_managed:
+        from . import credits
+
+        notify_early = opts.on_status_change
+        notify_early("Checking your credit…")
+        try:
+            managed = await credits.session_open()
+        except credits.CreditsError as err:
+            raise RuntimeError(str(err)) from err
+        opts = replace(opts, managed_token=managed.token, managed_app=managed.app)
+        print(
+            f"[runtime] managed session {managed.session_id} · "
+            f"{credits.format_duration(managed.balance // max(1, int(managed.tokens_per_sec)))} "
+            f"of credit",
+            flush=True,
+        )
+        notify_early(
+            "Credit: "
+            + credits.format_duration(
+                managed.balance // max(1, int(managed.tokens_per_sec))
+            )
+        )
+
     spec = provider.frame_spec(opts)
     camera = CameraTrack(
         device=opts.camera_device,
@@ -218,6 +291,26 @@ async def run_session(opts: RunOptions) -> None:
 
     session: Any = None
     display: Display | None = None
+    heartbeat: asyncio.Task[None] | None = None
+
+    def _on_first_frame() -> None:
+        """Frames are flowing — start the meter.
+
+        This is the billing boundary: the backend's first tick stamps the start
+        and charges nothing, so a session that connects but never renders costs
+        the customer nothing. Called from the Display loop, which runs on this
+        same event loop, so create_task is safe here.
+        """
+        nonlocal heartbeat
+        if managed is None or heartbeat is not None:
+            return
+        print("[runtime] managed: first frame — metering started", flush=True)
+        heartbeat = asyncio.create_task(
+            _managed_heartbeat(
+                managed.session_id, managed.heartbeat_interval, notify, quit_event
+            )
+        )
+
     try:
         session = await provider.connect(
             camera=camera,
@@ -232,6 +325,7 @@ async def run_session(opts: RunOptions) -> None:
                 watermark=_build_watermark_remover(opts),
                 show_window=opts.show_preview_window,
                 on_display_ready=opts.on_display_ready,
+                on_first_frame=_on_first_frame,
             ),
             notify=notify,
             quit_event=quit_event,
@@ -281,6 +375,16 @@ async def run_session(opts: RunOptions) -> None:
         if display_box and display_box[0] is not None:
             with suppress(Exception, asyncio.CancelledError):
                 await display_box[0].stop()
+        if heartbeat is not None:
+            heartbeat.cancel()
+            with suppress(Exception, asyncio.CancelledError):
+                await heartbeat
+        if managed is not None:
+            from . import credits as _credits
+
+            # Best-effort — session_close already swallows failures, and the
+            # server closes an abandoned session on its heartbeat timeout anyway.
+            await _credits.session_close(managed.session_id)
         camera.stop()
 
 
@@ -399,6 +503,7 @@ def _on_remote_stream(
     watermark: Any = None,
     show_window: bool = True,
     on_display_ready: Callable[[Any], None] | None = None,
+    on_first_frame: Callable[[], None] | None = None,
 ) -> None:
     record_path = record if record is not None else None
     if record is not None and not record.is_absolute():
@@ -414,6 +519,7 @@ def _on_remote_stream(
         vcam_backend=vcam_backend,
         watermark=watermark,
         show_window=show_window,
+        on_first_frame=on_first_frame,
     )
     disp.start()
     display_box[0] = disp

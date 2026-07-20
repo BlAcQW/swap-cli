@@ -150,6 +150,31 @@ def setup(
     )
 
 
+@app.command()
+def redeem(
+    code: Annotated[str, typer.Argument(help="Voucher code (SWAP-CR-…)")],
+) -> None:
+    """Redeem a prepaid credit voucher."""
+    from . import credits
+
+    async def _run() -> int:
+        try:
+            balance = await credits.redeem(code)
+        except credits.CreditsError as err:
+            err_console.print(f"[red]{err}[/red]")
+            return 1
+        console.print(
+            Panel.fit(
+                f"Credit added.\n\nBalance: [bold]{balance.label}[/bold]",
+                title="✓ Voucher redeemed",
+                border_style="green",
+            )
+        )
+        return 0
+
+    raise typer.Exit(asyncio.run(_run()))
+
+
 @app.command(name="config")
 def show_config() -> None:
     """Show current config (keys redacted)."""
@@ -159,11 +184,14 @@ def show_config() -> None:
     table.add_column("value")
     table.add_row("config path", str(config.config_path()))
     table.add_row("license key", _redact(cfg.license_key) or "[red]not set[/red]")
+    table.add_row("billing", "prepaid credits" if cfg.is_managed else "own API key")
     table.add_row("provider", cfg.provider)
     # Either provider key is enough, so a missing one is only dim — not red.
     table.add_row("decart api key", _redact(cfg.decart_api_key) or "[dim]not set[/dim]")
     table.add_row("fal api key", _redact(cfg.fal_api_key) or "[dim]not set[/dim]")
-    if not cfg.has_provider_key:
+    if cfg.is_managed:
+        pass  # no provider key expected — the server mints per-session tokens
+    elif not cfg.has_provider_key:
         table.add_row("backend", "[red]✗ no API key — add one in ⚙ Settings[/red]")
     elif not _provider_key_for(cfg):
         # Key on file, but for the OTHER backend — the mismatch that only shows
@@ -1223,16 +1251,35 @@ async def _doctor() -> None:
     else:
         _add("license key set", "[red]✗ run `swap setup`[/red]")
 
-    for label, key in (
-        ("decart api key set", cfg.decart_api_key),
-        ("fal api key set", cfg.fal_api_key),
-    ):
-        _add(label, "[green]✓[/green]" if key else "[yellow]⚠ not set[/yellow]")
+    if cfg.is_managed:
+        # Managed licences hold no provider key — compute is ours and metered
+        # against prepaid credit, so the balance is what actually matters.
+        _add("billing", "[green]✓ prepaid credits[/green]")
+        try:
+            from . import credits
+
+            bal = await credits.balance()
+            _add(
+                "credit remaining",
+                f"[green]✓ {bal.label}[/green]"
+                if bal.seconds >= 5
+                else f"[yellow]⚠ {bal.label} — redeem a voucher[/yellow]",
+            )
+        except Exception as err:  # diagnostics must never crash
+            _add("credit remaining", f"[yellow]⚠ couldn't fetch ({err})[/yellow]")
+    else:
+        for label, key in (
+            ("decart api key set", cfg.decart_api_key),
+            ("fal api key set", cfg.fal_api_key),
+        ):
+            _add(label, "[green]✓[/green]" if key else "[yellow]⚠ not set[/yellow]")
     # Only surfaced when it's a PROBLEM — a healthy setup shows nothing here, so
     # the table stays quiet. Still caught: no key at all, or a key for a provider
     # other than the selected one (which otherwise only fails at "Live", since
     # both key rows above can look fine on their own).
-    if not cfg.has_provider_key:
+    if cfg.is_managed:
+        pass  # nothing to check — no local key is expected
+    elif not cfg.has_provider_key:
         _add(
             "backend usable",
             "[red]✗ no API key for either provider — add one in ⚙ Settings[/red]",

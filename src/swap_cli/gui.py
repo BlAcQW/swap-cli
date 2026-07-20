@@ -128,6 +128,11 @@ class SwapGUI(ctk.CTk):
         self._voice_test_loop: asyncio.AbstractEventLoop | None = None
         self._voice_test_stop: Callable[[], None] | None = None
         self._status_var = tk.StringVar(value="Idle.")
+        # Managed mode only. Cached so the Live guard can check credit
+        # WITHOUT a network call — every other guard there is local, and a
+        # round-trip on the tk main thread would freeze the window.
+        self._credit_var = tk.StringVar(value="")
+        self._credit_seconds: int | None = None
 
         self._build_ui()
         self._refresh_cameras()
@@ -540,6 +545,14 @@ class SwapGUI(ctk.CTk):
             text_color="#9ca3af",
             font=ctk.CTkFont(size=11),
         ).pack(fill="x")
+        # Credit remaining — only ever populated on a managed licence.
+        ctk.CTkLabel(
+            status,
+            textvariable=self._credit_var,
+            anchor="w",
+            text_color="#22c55e",
+            font=ctk.CTkFont(size=11),
+        ).pack(fill="x")
 
         # Footer (pinned)
         ctk.CTkLabel(
@@ -668,7 +681,14 @@ class SwapGUI(ctk.CTk):
         return v.split()[0] if v else "lucy-2"
 
     def _selected_provider(self) -> str:
-        return "fal" if self._provider_var.get().strip().lower() == "fal" else "decart"
+        """Which backend to run. Defends against the picker not existing: it's
+        hidden on a managed licence, where the provider isn't the user's choice
+        (we supply the compute), and this is called unconditionally from
+        _on_live."""
+        var = getattr(self, "_provider_var", None)
+        if var is None:
+            return "fal" if config.load().is_managed else "decart"
+        return "fal" if var.get().strip().lower() == "fal" else "decart"
 
     def _on_provider_change(self, persist: bool = True) -> None:
         """Explain the tradeoff and persist the choice so it survives a restart.
@@ -754,6 +774,24 @@ class SwapGUI(ctk.CTk):
             print("[gui] bail: config incomplete", flush=True)
             self._status_var.set("⚠ Run `swap setup` in a terminal first.")
             return
+        # Managed licences run on prepaid credit. Warn with the real number
+        # BEFORE starting rather than counting down mid-call, and refuse outright
+        # below the floor — a session that dies ten seconds in is worse than one
+        # that never starts. Reads the cached value: every other guard here is
+        # local, and a network round-trip would freeze the window.
+        if cfg.is_managed and self._credit_seconds is not None:
+            from .credits import format_duration
+
+            if self._credit_seconds < 5:
+                self._status_var.set(
+                    f"⚠ Only {format_duration(self._credit_seconds)} of credit left "
+                    "— redeem a voucher in ⚙ Settings."
+                )
+                return
+            self._status_var.set(
+                f"Starting — {format_duration(self._credit_seconds)} of credit."
+            )
+
         if not self._reference_path:
             print("[gui] bail: no reference face loaded", flush=True)
             self._status_var.set("Pick a reference face first.")
@@ -901,7 +939,13 @@ class SwapGUI(ctk.CTk):
                 self._session_loop = None
                 self._stop_session = None
                 self.after(0, lambda: self._set_running(False))
-                self.after(0, lambda: self._status_var.set("Session ended."))
+                # Only the neutral default — _supervised_run may have posted
+                # a real reason ("out of credit", an error) and overwriting
+                # it would leave the user with no idea what happened.
+                self.after(0, self._settle_end_status)
+                threading.Thread(
+                    target=self._refresh_credit_async, daemon=True
+                ).start()
 
         self._session_thread = threading.Thread(target=worker, daemon=True)
         self._session_thread.start()
@@ -912,6 +956,7 @@ class SwapGUI(ctk.CTk):
 
         # Best-effort license check (non-blocking).
         threading.Thread(target=self._check_license_async, daemon=True).start()
+        threading.Thread(target=self._refresh_credit_async, daemon=True).start()
 
     async def _supervised_run(self, opts: RunOptions) -> None:
         print("[gui] _supervised_run entered", flush=True)
@@ -930,6 +975,37 @@ class SwapGUI(ctk.CTk):
             self.after(0, lambda m=msg: self._status_var.set(f"Error: {m}"))
         else:
             print("[gui] run_session returned cleanly", flush=True)
+
+    def _settle_end_status(self) -> None:
+        """Post the neutral end-of-session message, unless something already
+        explained why the session stopped."""
+        current = self._status_var.get()
+        if current.startswith(("Error:", "Out of credit", "Session ended")):
+            return
+        self._status_var.set("Session ended.")
+
+    def _refresh_credit_async(self) -> None:
+        """Fetch the prepaid balance in the background.
+
+        Cached into _credit_seconds so the Live guard can read it without a
+        network call. Silent on failure: a balance we couldn't fetch must not
+        block a session, and the server enforces the real floor at session open.
+        """
+        if not config.load().is_managed:
+            return
+        try:
+            from . import credits
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                bal = loop.run_until_complete(credits.balance())
+            finally:
+                loop.close()
+        except Exception:
+            return
+        self._credit_seconds = bal.seconds
+        self.after(0, lambda: self._credit_var.set(f"Credit: {bal.label}"))
 
     def _check_license_async(self) -> None:
         try:
@@ -1773,8 +1849,48 @@ class _SettingsModal(ctk.CTkToplevel):
             anchor="w",
         ).pack(fill="x", padx=14, pady=(0, 10))
 
+        # ── Prepaid credit (managed licences only) ─────────────────────
+        self._credit_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
+        ctk.CTkLabel(
+            self._credit_frame,
+            text="Prepaid credit",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#9ca3af",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(10, 0))
+        self._credit_balance = ctk.CTkLabel(
+            self._credit_frame,
+            text="Checking balance…",
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+        )
+        self._credit_balance.pack(fill="x", padx=14, pady=(2, 4))
+        ctk.CTkLabel(
+            self._credit_frame,
+            text="Paste a voucher code to top up.",
+            font=ctk.CTkFont(size=11),
+            text_color="#6b7280",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 4))
+        self._voucher_var = tk.StringVar(value="")
+        ctk.CTkEntry(
+            self._credit_frame,
+            textvariable=self._voucher_var,
+            placeholder_text="SWAP-CR-…",
+        ).pack(fill="x", padx=14, pady=(2, 4))
+        voucher_row = ctk.CTkFrame(self._credit_frame, fg_color="transparent")
+        voucher_row.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkButton(
+            voucher_row, text="Redeem", width=90, command=self._on_redeem
+        ).pack(side="left")
+        self._voucher_status = ctk.CTkLabel(
+            voucher_row, text="", anchor="w", font=ctk.CTkFont(size=11)
+        )
+        self._voucher_status.pack(side="left", padx=(8, 0))
+
         # ── Decart key (editable) ──────────────────────────────────────
         decart_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
+        self._decart_frame = decart_frame
         decart_frame.pack(fill="x", pady=(0, 12))
         ctk.CTkLabel(
             decart_frame,
@@ -1841,6 +1957,7 @@ class _SettingsModal(ctk.CTkToplevel):
         # than the Decart row (no redact/edit dance): it's optional, and a user
         # who's here is pasting a fresh key rather than auditing a live one.
         fal_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
+        self._fal_frame = fal_frame
         fal_frame.pack(fill="x", pady=(0, 12))
         ctk.CTkLabel(
             fal_frame,
@@ -1923,6 +2040,9 @@ class _SettingsModal(ctk.CTkToplevel):
             anchor="w",
         ).pack(fill="x", side="bottom", pady=(0, 8))
 
+        # Last: every card above must exist before visibility is decided.
+        self._sync_mode_rows()
+
     def _on_edit(self) -> None:
         self._editing = True
         self._decart_label.pack_forget()
@@ -1946,6 +2066,83 @@ class _SettingsModal(ctk.CTkToplevel):
         self._edit_btn.pack(side="left")
         self._show_btn.pack(side="left", padx=(8, 0))
         self._error_label.configure(text="")
+
+    def _sync_mode_rows(self) -> None:
+        """Show only the rows that apply to this licence.
+
+        Managed licences never hold a provider key — compute is ours — so the
+        key cards are hidden and the credit card shown. Uses pack_forget rather
+        than skipping construction: _on_open_folder references a widget declared
+        inside the Decart card, so never building it would raise AttributeError.
+        """
+        managed = config.load().is_managed
+        if managed:
+            self._decart_frame.pack_forget()
+            self._fal_frame.pack_forget()
+            self._credit_frame.pack(fill="x", pady=(0, 12), before=self._decart_frame)
+            threading.Thread(target=self._load_balance_async, daemon=True).start()
+        else:
+            self._credit_frame.pack_forget()
+
+    def _load_balance_async(self) -> None:
+        try:
+            from . import credits
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                bal = loop.run_until_complete(credits.balance())
+            finally:
+                loop.close()
+        except Exception as err:  # surface, never crash the modal
+            self.after(
+                0, lambda e=err: self._credit_balance.configure(text=f"Unavailable ({e})")
+            )
+            return
+        self.after(0, lambda: self._credit_balance.configure(text=bal.label))
+
+    def _on_redeem(self) -> None:
+        code = (self._voucher_var.get() or "").strip()
+        if not code:
+            self._voucher_status.configure(text="Enter a code", text_color="#ef4444")
+            return
+        self._voucher_status.configure(text="Redeeming…", text_color="#9ca3af")
+        threading.Thread(
+            target=self._redeem_async, args=(code,), daemon=True
+        ).start()
+
+    def _redeem_async(self, code: str) -> None:
+        from . import credits
+
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                bal = loop.run_until_complete(credits.redeem(code))
+            finally:
+                loop.close()
+        except Exception as err:  # includes CreditsError, already in English
+            self.after(
+                0,
+                lambda e=err: self._voucher_status.configure(
+                    text=str(e), text_color="#ef4444"
+                ),
+            )
+            return
+        self.after(0, lambda: self._voucher_var.set(""))
+        self.after(
+            0,
+            lambda: self._voucher_status.configure(
+                text="Redeemed ✓", text_color="#22c55e"
+            ),
+        )
+        self.after(0, lambda: self._credit_balance.configure(text=bal.label))
+        # Push the new balance to the main window so the Live guard sees it.
+        with suppress(Exception):
+            self._parent._credit_seconds = bal.seconds
+            self.after(
+                0, lambda: self._parent._credit_var.set(f"Credit: {bal.label}")
+            )
 
     def _on_save_fal(self) -> None:
         """Persist (or clear) the fal key. Optional — an empty box just means the

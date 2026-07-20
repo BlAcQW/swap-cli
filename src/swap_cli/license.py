@@ -25,6 +25,10 @@ class LicenseStatus:
     plan: str | None = None
     expires_at: int | None = None
     cached: bool = False
+    # "byok" (user's own API key) or "managed" (prepaid credit we meter).
+    # Defaults to byok so an older backend that omits the field can't flip a
+    # customer into a mode the client can't serve.
+    mode: str = "byok"
 
 
 class LicenseError(Exception):
@@ -48,6 +52,22 @@ _REASON_TEXT = {
     "license_revoked": "revoked — contact support",
     "license_expired": "expired — renew to keep using swap-cli",
     "invalid_format": "doesn't look like a valid key — check it with `swap setup`",
+    # Codes from the managed-credits endpoints (/api/cli/*).
+    "insufficient_credit": (
+        "not enough credit left for a session — redeem a voucher to top up"
+    ),
+    "machine_not_registered": (
+        "this device isn't registered to the licence yet — run `swap doctor` first"
+    ),
+    "session_already_active": (
+        "a session is already running on this licence — stop it before starting another"
+    ),
+    "voucher_not_found": "that voucher code doesn't exist — check for typos",
+    "voucher_used": "that voucher has already been redeemed",
+    "voucher_void": "that voucher was cancelled — contact support",
+    "voucher_expired": "that voucher has expired",
+    "rate_limited": "too many attempts — wait a minute and try again",
+    "server_error": "the server hit an unexpected error — try again shortly",
     "too_many_machines": (
         "already activated on the maximum number of machines for this licence. "
         "Remove an old machine (or ask support to), then try again"
@@ -130,6 +150,7 @@ async def validate(*, force_online: bool = False) -> LicenseStatus:
             reason="cached",
             cached=True,
             expires_at=cfg.license_cached_valid_until,
+            mode=cfg.license_mode,
         )
 
     payload = {
@@ -156,6 +177,7 @@ async def validate(*, force_online: bool = False) -> LicenseStatus:
                 reason="offline_grace",
                 cached=True,
                 expires_at=cfg.license_cached_valid_until,
+                mode=cfg.license_mode,
             )
         raise LicenseError(f"License server unreachable: {err}") from err
 
@@ -179,10 +201,16 @@ async def validate(*, force_online: bool = False) -> LicenseStatus:
     data = body.get("data", {})
     expires_at = int(data.get("expiresAt", now + 7 * 24 * 3600))
     plan = data.get("plan")
+    mode = data.get("mode") or "byok"
 
     config.update(
         license_cached_at=now,
         license_cached_valid_until=expires_at,
+        # Cached so the GUI can render the right controls on next launch
+        # before the first network round-trip completes.
+        license_mode=mode,
     )
 
-    return LicenseStatus(valid=True, reason="ok", plan=plan, expires_at=expires_at)
+    return LicenseStatus(
+        valid=True, reason="ok", plan=plan, expires_at=expires_at, mode=mode
+    )
