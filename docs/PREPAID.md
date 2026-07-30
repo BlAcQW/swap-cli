@@ -20,6 +20,35 @@ You do **not** need a Decart or fal API key in managed mode.
 
 ## Track A — New user (fresh machine)
 
+### 0. Before you install — what to have / download first
+
+**Required:**
+- A **Windows 10 or 11 PC (64-bit)** with a **webcam**. *(macOS/Linux also work,
+  via the pip route in step 1.)*
+- Your **licence key** (`SWAP-CLI-…`) and at least one **voucher code**
+  (`SWAP-CR-…`) — we give you these.
+- **Python 3.11+** — **only if** you'll use the pip route. Install from
+  [python.org](https://www.python.org/downloads/) and tick **“Add Python to
+  PATH”**. The `.exe` route needs **no Python**.
+
+**Download only if you want the swap *inside a video call*:**
+- **WhatsApp Desktop →** DroidCam **Drivers**: `DroidCam.Drivers.exe` from
+  [dev47apps releases](https://github.com/dev47apps/droidcam-obs-virtual-output/releases).
+  Take the *Drivers* file only — not the OBS plugin.
+- **Zoom / Meet / Discord / Teams →** [OBS Studio](https://obsproject.com/download).
+  You don't run OBS; swap-cli just uses its virtual camera.
+
+**You do NOT need (managed mode):**
+- ❌ Any Decart / fal **API key** — compute is included in your minutes.
+- ❌ **ffmpeg** or a virtual audio cable — those are only for the optional
+  voice feature, not face swap.
+
+**Two Windows heads-ups for the `.exe`:**
+- On first open, **SmartScreen** may say *“Windows protected your PC”* → click
+  **More info → Run anyway** (the app isn't code-signed yet).
+- If it won't start at all, install the **Microsoft Visual C++ Redistributable
+  (x64)** from Microsoft, then reopen.
+
 ### 1. Get the app
 
 - **No Python (recommended):** download the latest

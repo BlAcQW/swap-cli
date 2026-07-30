@@ -5,11 +5,12 @@ All notable changes to swap-cli.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.1.6] — 2026-07-20 — managed credit + Windows installer
+## [0.1.7] — 2026-07-30 — managed credit + Windows installer
 
 The first release that carries the managed-credits work. Until now the only
 published build (0.1.5) was bring-your-own-key; everything below shipped on
-`main` but never reached PyPI.
+`main` but never reached PyPI. (0.1.6 was tagged but never published — its
+release gate failed on two OpenCV-brittle tests, now fixed.)
 
 ### Added
 
