@@ -43,6 +43,11 @@ ctk.set_default_color_theme("blue")
 
 THUMB_SIZE = (140, 140)
 
+# User-facing alias for the fal backend. The internal provider value stays
+# "fal" everywhere (config, runtime, provider registry) — only the label the
+# user reads is aliased, so the vendor name never surfaces in the UI.
+_FAL_LABEL = "Agent Q"
+
 
 # Sprint 14l: settings panel helpers.
 # Pure functions so they're trivially unit-testable without spinning a tk root.
@@ -298,36 +303,37 @@ class SwapGUI(ctk.CTk):
         ).pack(anchor="w", pady=(2, 0))
         self._sync_watermark_options()  # hide the picker if removal starts off
 
-        # Provider selector (Sprint 18). Decart is the default (WebRTC). fal.ai
-        # resells the SAME Lucy model over a websocket on fal's own Decart
-        # account — so it's a second source, and possibly a way around the
-        # "AI Generated" badge Decart refuses to lift for us. Read at start-time
-        # like the other options: switch it before clicking Live.
-        provider_row = ctk.CTkFrame(outer, fg_color="transparent")
-        provider_row.pack(fill="x", pady=(14, 0))
-        ctk.CTkLabel(
-            provider_row, text="Provider", anchor="w", font=ctk.CTkFont(size=11)
-        ).pack(anchor="w")
-        self._provider_var = tk.StringVar(
-            value="Fal" if (_wm_cfg.provider or "decart") == "fal" else "Decart"
-        )
-        ctk.CTkSegmentedButton(
-            provider_row,
-            values=["Decart", "Fal"],
-            variable=self._provider_var,
-            command=lambda _v=None: self._on_provider_change(),
-        ).pack(anchor="w", fill="x", pady=(2, 0))
-        self._provider_hint = ctk.CTkLabel(
-            provider_row,
-            text="",
-            anchor="w",
-            font=ctk.CTkFont(size=10),
-            text_color="#6b7280",
-            wraplength=460,
-            justify="left",
-        )
-        self._provider_hint.pack(anchor="w", pady=(2, 0))
-        self._on_provider_change(persist=False)  # seed the hint
+        # Provider selector (Sprint 18) — BYOK only. A managed licence never
+        # picks the backend (we supply the compute and choose the no-badge
+        # engine), so the whole row is built only when the user brings their own
+        # key. "Agent Q" is the user-facing alias for the fal backend; the
+        # internal value stays "fal". Read at start-time: switch before Live.
+        if not _wm_cfg.is_managed:
+            provider_row = ctk.CTkFrame(outer, fg_color="transparent")
+            provider_row.pack(fill="x", pady=(14, 0))
+            ctk.CTkLabel(
+                provider_row, text="Provider", anchor="w", font=ctk.CTkFont(size=11)
+            ).pack(anchor="w")
+            self._provider_var = tk.StringVar(
+                value=_FAL_LABEL if (_wm_cfg.provider or "decart") == "fal" else "Decart"
+            )
+            ctk.CTkSegmentedButton(
+                provider_row,
+                values=["Decart", _FAL_LABEL],
+                variable=self._provider_var,
+                command=lambda _v=None: self._on_provider_change(),
+            ).pack(anchor="w", fill="x", pady=(2, 0))
+            self._provider_hint = ctk.CTkLabel(
+                provider_row,
+                text="",
+                anchor="w",
+                font=ctk.CTkFont(size=10),
+                text_color="#6b7280",
+                wraplength=460,
+                justify="left",
+            )
+            self._provider_hint.pack(anchor="w", pady=(2, 0))
+            self._on_provider_change(persist=False)  # seed the hint
 
         # Which camera driver receives the output. OBS's virtual camera is a
         # DirectShow filter, which WhatsApp Desktop refuses to enumerate — the
@@ -732,7 +738,7 @@ class SwapGUI(ctk.CTk):
         var = getattr(self, "_provider_var", None)
         if var is None:
             return "fal" if config.load().is_managed else "decart"
-        return "fal" if var.get().strip().lower() == "fal" else "decart"
+        return "fal" if var.get().strip() == _FAL_LABEL else "decart"
 
     def _on_provider_change(self, persist: bool = True) -> None:
         """Explain the tradeoff and persist the choice so it survives a restart.
@@ -742,13 +748,13 @@ class SwapGUI(ctk.CTk):
         if provider == "fal":
             if cfg.fal_api_key:
                 hint = (
-                    "fal.ai runs the same Lucy model on fal's account, billed "
+                    f"{_FAL_LABEL} — same Lucy model, no on-screen badge, billed "
                     "per second. Switch takes effect next time you go Live."
                 )
             else:
                 hint = (
-                    "⚠ No fal API key yet — add one in ⚙ Settings "
-                    "(get it at fal.ai/dashboard/keys), or Live will fail."
+                    f"⚠ No {_FAL_LABEL} key yet — add one in ⚙ Settings, "
+                    "or Live will fail."
                 )
         else:
             hint = "Decart — the default realtime path (WebRTC)."
