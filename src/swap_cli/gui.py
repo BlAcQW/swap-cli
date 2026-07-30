@@ -2132,9 +2132,13 @@ class _SettingsModal(ctk.CTkToplevel):
         """
         managed = config.load().is_managed
         if managed:
+            # Slot the credit card into the Decart card's position FIRST, then
+            # hide the key cards. Packing `before=` a frame we've already
+            # pack_forget()-ten raises "isn't packed" (TclError) — so the order
+            # of these three lines matters.
+            self._credit_frame.pack(fill="x", pady=(0, 12), before=self._decart_frame)
             self._decart_frame.pack_forget()
             self._fal_frame.pack_forget()
-            self._credit_frame.pack(fill="x", pady=(0, 12), before=self._decart_frame)
             threading.Thread(target=self._load_balance_async, daemon=True).start()
         else:
             self._credit_frame.pack_forget()

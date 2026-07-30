@@ -125,8 +125,29 @@ async def balance() -> Balance:
 
 
 async def redeem(code: str) -> Balance:
-    """Redeem a voucher. Raises CreditsError with the reason on failure."""
-    data = await _post("voucher/redeem", {"code": code.strip().upper()})
+    """Redeem a voucher. Raises CreditsError with the reason on failure.
+
+    A brand-new device (fresh `swap setup`) isn't registered against the licence
+    yet, so the read-only redeem auth rejects it with `machine_not_registered`.
+    Instead of making the user run `swap doctor` first, we register the device
+    with a validate on that specific error and retry once — so `setup → redeem`
+    just works.
+    """
+    payload = {"code": code.strip().upper()}
+    try:
+        data = await _post("voucher/redeem", payload)
+    except CreditsError as err:
+        if err.code != "machine_not_registered":
+            raise
+        from . import license  # local import: license imports config, not credits
+
+        try:
+            status = await license.validate(force_online=True)
+        except license.LicenseError as lic_err:
+            raise CreditsError("server_error", str(lic_err)) from lic_err
+        if not status.valid:
+            raise CreditsError(status.reason) from err
+        data = await _post("voucher/redeem", payload)
     return Balance(
         tokens=int(data.get("balance", 0)),
         tokens_per_sec=float(data.get("tokensPerSec", 1) or 1),

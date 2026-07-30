@@ -142,6 +142,53 @@ async def test_server_error_code_is_preserved_for_translation(monkeypatch) -> No
     assert license.explain("insufficient_credit") == str(excinfo.value)
 
 
+async def test_redeem_registers_device_then_retries(monkeypatch) -> None:
+    """A fresh device (just did `swap setup`) gets `machine_not_registered`.
+    redeem should register it with a validate and retry once, so the user
+    doesn't have to run `swap doctor` first."""
+    from swap_cli import license
+
+    calls = {"post": 0, "validate": 0}
+
+    async def fake_post(path, payload=None):
+        calls["post"] += 1
+        if calls["post"] == 1:
+            raise credits.CreditsError("machine_not_registered")
+        return {"balance": 240, "tokensPerSec": 1, "seconds": 240}
+
+    async def fake_validate(*, force_online=False):
+        calls["validate"] += 1
+        return license.LicenseStatus(valid=True, reason="online", mode="managed")
+
+    monkeypatch.setattr(credits, "_post", fake_post)
+    monkeypatch.setattr(license, "validate", fake_validate)
+
+    bal = await credits.redeem("swap-cr-abcd")
+
+    assert bal.seconds == 240
+    assert calls == {"post": 2, "validate": 1}  # failed → registered → retried
+
+
+async def test_redeem_gives_up_if_device_cannot_register(monkeypatch) -> None:
+    """If the register-validate itself fails (e.g. too many machines), redeem
+    surfaces that reason rather than looping."""
+    from swap_cli import license
+
+    async def fake_post(path, payload=None):
+        raise credits.CreditsError("machine_not_registered")
+
+    async def fake_validate(*, force_online=False):
+        return license.LicenseStatus(valid=False, reason="too_many_machines")
+
+    monkeypatch.setattr(credits, "_post", fake_post)
+    monkeypatch.setattr(license, "validate", fake_validate)
+
+    with pytest.raises(credits.CreditsError) as excinfo:
+        await credits.redeem("swap-cr-abcd")
+
+    assert excinfo.value.code == "too_many_machines"
+
+
 async def test_non_json_reply_does_not_crash(monkeypatch) -> None:
     """A proxy or CDN can return HTML here; that must surface as a clean error."""
     import httpx
