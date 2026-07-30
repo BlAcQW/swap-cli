@@ -39,6 +39,13 @@ published build (0.1.5) was bring-your-own-key; everything below shipped on
 
 ### Fixed
 
+- **Crash on going Live (Windows `PermissionError: [WinError 32]`).** Config is
+  written from several threads at once (licence check, credit refresh, and the
+  Live worker's re-validate), and they raced on a single `config.toml.tmp`, so
+  `os.replace` failed when the file was momentarily held by another writer — or
+  by an antivirus/indexer. Writes are now serialised under a process lock, each
+  uses a unique staging file, and the atomic replace retries briefly against
+  transient locks.
 - The machine id is now stable across restarts, so a single install no longer
   burns through its machine seats.
 

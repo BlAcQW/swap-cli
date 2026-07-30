@@ -6,8 +6,11 @@ import hashlib
 import os
 import platform
 import sys
+import threading
+import time
 import tomllib
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,20 @@ from platformdirs import user_config_dir
 
 APP_NAME = "swap-cli"
 CONFIG_FILENAME = "config.toml"
+
+# Serialises config writes within the process. The GUI writes config from
+# several threads at once — the launch-time licence check, the credit refresh,
+# and the Live worker's force-online re-validate can all land on save() at the
+# same instant. Without this they race on the temp file and, on Windows, one
+# os.replace() fails with WinError 32 ("used by another process"). Reentrant so
+# update() can hold it across load→merge→save without deadlocking on save().
+_WRITE_LOCK = threading.RLock()
+
+# Windows only: os.replace() also fails transiently with WinError 32 when an
+# antivirus / Search indexer / cloud-sync agent has the target open for a beat.
+# Retry a few times before giving up.
+_REPLACE_RETRIES = 10
+_REPLACE_BACKOFF_SEC = 0.05
 
 
 @dataclass(frozen=True)
@@ -201,16 +218,54 @@ def save(cfg: Config) -> Path:
         body.append(f'license_mode = "{_escape(cfg.license_mode)}"')
 
     text = "\n".join(body) + "\n"
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    if os.name != "nt":
-        os.chmod(tmp, 0o600)
-    tmp.replace(path)
+    # Per-writer temp name (pid + thread + random) so two concurrent saves can
+    # never clobber each other's staging file — the shared "config.toml.tmp"
+    # was the collision that surfaced as WinError 32 on Windows.
+    tmp = path.with_suffix(
+        f"{path.suffix}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp"
+    )
+    with _WRITE_LOCK:
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            if os.name != "nt":
+                os.chmod(tmp, 0o600)
+            _replace_with_retry(tmp, path)
+        finally:
+            # Never leave a staging file behind (e.g. if replace ultimately failed).
+            with suppress(OSError):
+                if tmp.exists():
+                    tmp.unlink()
     return path
 
 
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    """os.replace, retried against transient Windows file locks (WinError 32).
+
+    On POSIX replace is atomic and never hits this, so the first attempt wins.
+    On Windows an AV/indexer/sync agent can briefly hold the destination open;
+    a short backoff clears it. Re-raises the last error if it never clears.
+    """
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_RETRIES - 1:
+                raise
+            time.sleep(_REPLACE_BACKOFF_SEC * (attempt + 1))
+
+
 def update(**kwargs: Any) -> Config:
-    """Patch the on-disk config with new values."""
+    """Patch the on-disk config with new values.
+
+    Held under the write lock so a concurrent load→merge→save from another
+    thread can't lose this update (last-writer-wins) or collide on the file.
+    """
+    with _WRITE_LOCK:
+        return _update_locked(**kwargs)
+
+
+def _update_locked(**kwargs: Any) -> Config:
     current = load()
     merged = Config(
         license_key=kwargs.get("license_key", current.license_key),
