@@ -5,6 +5,26 @@ All notable changes to swap-cli.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] — 2026-07-30 — managed onboarding fixes
+
+Fixes found while switching a real user from BYOK to prepaid.
+
+### Fixed
+
+- **Opening ⚙ Settings on a managed licence crashed** (`TclError: window isn't
+  packed`). The credit card was being packed *before* the Decart card right
+  after that card had been hidden. Now packed into position before the key
+  cards are hidden.
+- **`swap redeem` on a fresh device failed** with "this device isn't registered
+  — run `swap doctor` first". Redeem now registers the device itself (a validate)
+  and retries once, so `swap setup → swap redeem` works with no `doctor` step.
+
+### Changed
+
+- The realtime backend formerly shown as **“Fal”** now reads **“Agent Q”** in
+  the UI (internal value unchanged). The provider picker is **BYOK-only** — a
+  managed/prepaid licence never shows it, since compute is supplied for them.
+
 ## [0.1.7] — 2026-07-30 — managed credit + Windows installer
 
 The first release that carries the managed-credits work. Until now the only
