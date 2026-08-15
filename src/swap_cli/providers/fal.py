@@ -210,7 +210,12 @@ class FalRealtimeConnection:
     async def _signal_send(self, obj: dict[str, Any]) -> None:
         import msgpack
 
-        await self._ws.send(msgpack.packb(obj, use_bin_type=True))
+        payload = msgpack.packb(obj, use_bin_type=True)
+        label = obj.get("type", "identity")
+        print(
+            f"[runtime] engine signaling: → {label} ({len(payload)} bytes)", flush=True
+        )
+        await self._ws.send(payload)
 
     def _decode_incoming(self, raw: Any) -> Any:
         import msgpack
@@ -246,6 +251,11 @@ class FalRealtimeConnection:
         try:
             while True:
                 raw = await self._ws.recv()
+                size = len(raw) if isinstance(raw, (bytes, bytearray, str)) else 0
+                print(
+                    f"[runtime] engine signaling: ← {type(raw).__name__} ({size} bytes)",
+                    flush=True,
+                )
                 await self._handle(self._decode_incoming(raw))
         except asyncio.CancelledError:
             raise
