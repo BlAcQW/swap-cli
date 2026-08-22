@@ -161,11 +161,20 @@ async def _managed_heartbeat(
     """
     from . import credits
 
+    # Tick the instant frames start, not after the first interval. The server
+    # stamps startedBillingAt on the FIRST tick and bills from there, so sleeping
+    # first left the opening interval (~10s every session) unbilled while the
+    # provider still charged us for it. `first` makes the opening tick immediate;
+    # every later tick waits one interval.
+    first = True
     while not quit_event.is_set():
         try:
-            await asyncio.sleep(interval)
-            if quit_event.is_set():
-                return
+            if first:
+                first = False
+            else:
+                await asyncio.sleep(interval)
+                if quit_event.is_set():
+                    return
             tick = await credits.session_tick(session_id)
             if tick.should_disconnect:
                 notify(
@@ -178,6 +187,9 @@ async def _managed_heartbeat(
             raise
         except Exception as err:  # a transient blip must not end the call
             print(f"[runtime] managed: heartbeat failed ({err}); retrying", flush=True)
+            # Back off before retrying so a persistent error can't spin the loop
+            # (the immediate-first-tick change removed the guaranteed pre-tick sleep).
+            await asyncio.sleep(interval)
 
 
 async def run_session(opts: RunOptions) -> None:
