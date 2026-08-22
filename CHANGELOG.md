@@ -5,6 +5,19 @@ All notable changes to swap-cli.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.9] — 2026-08-22 — honest metering
+
+### Fixed
+
+- **Billing now starts at the first frame.** The metering heartbeat waited a full
+  interval (~10s) before its first check-in, and the server begins billing on that
+  first tick — so the opening ~10 seconds of every managed session went unbilled
+  while the provider charged from the handshake. The client now checks in the
+  instant frames start, so metered time lines up with real streaming time.
+- Pairs with a server-side fix (already live) that bills the final stretch between
+  the last heartbeat and Stop, which was previously free. Together, a session's
+  billed seconds now match what the compute provider actually charges.
+
 ## [0.1.8] — 2026-07-30 — managed onboarding fixes
 
 Fixes found while switching a real user from BYOK to prepaid.
