@@ -5,6 +5,20 @@ All notable changes to swap-cli.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.10] — 2026-10-03 — prepaid UI + watermark switch
+
+### Fixed
+
+- **Prepaid licences show the prepaid UI from the first launch.** A fresh install
+  assumed "own API key" until the first Live, so Settings showed the Decart/fal key
+  cards and no voucher box. `swap setup` now checks the licence with the server
+  right away, and `swap gui` re-checks on launch and switches the controls live.
+- **The watermark remover never runs on fal (Agent Q).** fal streams no badge, so
+  removal could only paint over real pixels. Every prepaid session runs on fal.
+- **The "Remove watermark" switch is honest.** It now applies mid-session instead
+  of only when Live starts, and turning it off is saved — it used to come back ON
+  at every launch.
+
 ## [0.1.9] — 2026-08-22 — honest metering
 
 ### Fixed
