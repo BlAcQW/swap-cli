@@ -132,18 +132,38 @@ def setup(
     if fal_api_key:
         updates["fal_api_key"] = fal_api_key
 
-    cfg = config.update(**updates)
+    config.update(**updates)
+    # Ask the server what this licence is NOW so the first `swap gui` draws the
+    # right controls (a fresh install caches `byok`, hiding the voucher box).
+    # Also registers this device. Best-effort: offline, the app checks on launch.
+    try:
+        check = asyncio.run(license.validate(force_online=True))
+    except Exception:
+        check = None
+    cfg = config.load()
     path = config.config_path()
     lines = [f"Saved to [bold]{path}[/bold]", f"License: {_redact(cfg.license_key)}"]
-    if cfg.decart_api_key:
-        lines.append(f"Decart key: {_redact(cfg.decart_api_key)}")
-    if cfg.fal_api_key:
-        lines.append(f"fal key: {_redact(cfg.fal_api_key)}")
-    if not cfg.has_provider_key:
+    if check is not None and not check.valid:
+        lines.append(f"\n[red]Licence check failed:[/red] {license.explain(check.reason)}")
+    elif cfg.is_managed:
         lines.append(
-            "\n[yellow]No backend API key yet[/yellow] — add one in "
-            "[bold]⚙ Settings[/bold] (`swap gui`) before going live."
+            "Billing: [bold]prepaid credit[/bold] — redeem a voucher with "
+            "`swap redeem CODE` or in [bold]⚙ Settings[/bold]."
         )
+    else:
+        if cfg.decart_api_key:
+            lines.append(f"Decart key: {_redact(cfg.decart_api_key)}")
+        if cfg.fal_api_key:
+            lines.append(f"fal key: {_redact(cfg.fal_api_key)}")
+        if not cfg.has_provider_key:
+            lines.append(
+                "\n[yellow]No backend API key yet[/yellow] — add one in "
+                "[bold]⚙ Settings[/bold] (`swap gui`) before going live."
+            )
+        if check is None:
+            lines.append(
+                "\n[dim]Couldn't reach the licence server — it'll be checked when you launch.[/dim]"
+            )
     lines.append("\nRun [bold cyan]swap doctor[/bold cyan] to verify everything works.")
     console.print(
         Panel.fit("\n".join(lines), title="✓ Setup complete", border_style="green")

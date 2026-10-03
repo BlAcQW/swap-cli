@@ -171,11 +171,24 @@ class SwapGUI(ctk.CTk):
         # round-trip on the tk main thread would freeze the window.
         self._credit_var = tk.StringVar(value="")
         self._credit_seconds: int | None = None
+        # The mode the controls were drawn for. Read from the CACHED config, so
+        # on a fresh install it's `byok` until the server says otherwise —
+        # _apply_license_mode re-renders when the startup validate disagrees.
+        self._ui_managed = config.load().is_managed
 
         self._build_ui()
         self._refresh_cameras()
         self._refresh_status()
         self._refresh_voice_section()
+
+        # Learn the licence's real mode now, not only when Live is clicked —
+        # otherwise a prepaid key shows byok controls (and no voucher box)
+        # until the first session. Background thread: never block the window.
+        if config.load().license_key:
+            threading.Thread(
+                target=self._check_license_async, args=(True,), daemon=True
+            ).start()
+        threading.Thread(target=self._refresh_credit_async, daemon=True).start()
 
     # ── UI build ──────────────────────────────────────────────────────
 
@@ -311,6 +324,9 @@ class SwapGUI(ctk.CTk):
         if not _wm_cfg.is_managed:
             provider_row = ctk.CTkFrame(outer, fg_color="transparent")
             provider_row.pack(fill="x", pady=(14, 0))
+            # Kept so _apply_license_mode can hide it if the startup validate
+            # finds the licence is actually prepaid.
+            self._provider_row = provider_row
             ctk.CTkLabel(
                 provider_row, text="Provider", anchor="w", font=ctk.CTkFont(size=11)
             ).pack(anchor="w")
@@ -735,9 +751,13 @@ class SwapGUI(ctk.CTk):
         hidden on a managed licence, where the provider isn't the user's choice
         (we supply the compute), and this is called unconditionally from
         _on_live."""
+        # Managed always runs on our fal account, even if the window was drawn
+        # as byok (picker present) before the startup validate learned the mode.
+        if config.load().is_managed:
+            return "fal"
         var = getattr(self, "_provider_var", None)
         if var is None:
-            return "fal" if config.load().is_managed else "decart"
+            return "decart"
         return "fal" if var.get().strip() == _FAL_LABEL else "decart"
 
     def _on_provider_change(self, persist: bool = True) -> None:
@@ -1057,12 +1077,14 @@ class SwapGUI(ctk.CTk):
         self._credit_seconds = bal.seconds
         self.after(0, lambda: self._credit_var.set(f"Credit: {bal.label}"))
 
-    def _check_license_async(self) -> None:
+    def _check_license_async(self, force_online: bool = False) -> None:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                status = loop.run_until_complete(license.validate())
+                status = loop.run_until_complete(
+                    license.validate(force_online=force_online)
+                )
             finally:
                 loop.close()
             if not status.valid:
@@ -1073,9 +1095,45 @@ class SwapGUI(ctk.CTk):
                         f"License: {reason_text} — swap.storelygh.com"
                     ),
                 )
+                return
+            managed = (status.mode or "byok").strip().lower() == "managed"
+            self.after(0, lambda: self._apply_license_mode(managed))
         except Exception:
             # Network down or backend not reachable; offline grace handles it
             pass
+
+    def _apply_license_mode(self, managed: bool) -> None:
+        """Re-render the mode-dependent controls once the server says whether
+        this licence is prepaid.
+
+        The window is drawn from the cached mode before any network call, and a
+        fresh `swap setup` caches `byok` — so without this a prepaid customer
+        saw the Decart/fal key cards and no voucher box until a relaunch.
+        Main-thread only (scheduled via after()).
+        """
+        if managed == self._ui_managed:
+            return
+        self._ui_managed = managed
+        modal = getattr(self, "_settings_modal", None)
+        if modal is not None and modal.winfo_exists():
+            modal._sync_mode_rows()
+        row = getattr(self, "_provider_row", None)
+        if managed:
+            if row is not None:
+                row.pack_forget()
+            # The byok "add your API key" nag no longer applies.
+            if self._status_var.get().startswith("⚠ Add your backend API key"):
+                self._status_var.set("")
+            threading.Thread(target=self._refresh_credit_async, daemon=True).start()
+        else:
+            # Prepaid → own-key mid-session is rare (a licence changed on the
+            # server); the provider picker was never built, so ask for a reopen
+            # rather than bolting it on in the wrong place.
+            self._credit_seconds = None
+            self._credit_var.set("")
+            self._status_var.set(
+                "⚠ This licence now uses your own API key — reopen swap to pick a provider."
+            )
 
     def _on_stop(self) -> None:
         if self._stop_session is None:
@@ -1880,6 +1938,8 @@ class _SettingsModal(ctk.CTkToplevel):
         # Python (no `swap setup`) pastes their key here to onboard.
         license_frame = ctk.CTkFrame(outer, fg_color="#1f2937", corner_radius=8)
         license_frame.pack(fill="x", pady=(0, 12))
+        # Always shown — the anchor _sync_mode_rows packs the mode cards after.
+        self._license_frame = license_frame
         ctk.CTkLabel(
             license_frame,
             text="License key",
@@ -2135,19 +2195,26 @@ class _SettingsModal(ctk.CTkToplevel):
         key cards are hidden and the credit card shown. Uses pack_forget rather
         than skipping construction: _on_open_folder references a widget declared
         inside the Decart card, so never building it would raise AttributeError.
+
+        Called when the modal opens AND again whenever the main window learns
+        the licence's real mode from the server (a fresh `swap setup` caches
+        `byok` until the first validate), so it must be idempotent and work in
+        both directions. Every card is packed `after=` the licence card — which
+        is always shown — rather than `before=` a card that may be hidden
+        ("isn't packed" TclError).
         """
         managed = config.load().is_managed
         if managed:
-            # Slot the credit card into the Decart card's position FIRST, then
-            # hide the key cards. Packing `before=` a frame we've already
-            # pack_forget()-ten raises "isn't packed" (TclError) — so the order
-            # of these three lines matters.
-            self._credit_frame.pack(fill="x", pady=(0, 12), before=self._decart_frame)
+            if not self._credit_frame.winfo_manager():
+                self._credit_frame.pack(fill="x", pady=(0, 12), after=self._license_frame)
+                threading.Thread(target=self._load_balance_async, daemon=True).start()
             self._decart_frame.pack_forget()
             self._fal_frame.pack_forget()
-            threading.Thread(target=self._load_balance_async, daemon=True).start()
         else:
             self._credit_frame.pack_forget()
+            if not self._decart_frame.winfo_manager():
+                self._decart_frame.pack(fill="x", pady=(0, 12), after=self._license_frame)
+                self._fal_frame.pack(fill="x", pady=(0, 12), after=self._decart_frame)
 
     def _load_balance_async(self) -> None:
         try:

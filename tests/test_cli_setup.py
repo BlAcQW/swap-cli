@@ -43,6 +43,18 @@ _install_stubs()
 from swap_cli import config  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _offline_license(monkeypatch):
+    """`swap setup` asks the licence server for the mode; default every test to
+    a byok answer so none of them reaches the network."""
+    from swap_cli import license
+
+    async def _byok(*, force_online: bool = False) -> license.LicenseStatus:
+        return license.LicenseStatus(valid=True, reason="ok", mode="byok")
+
+    monkeypatch.setattr(license, "validate", _byok)
+
+
 def _cfg(**kwargs) -> config.Config:
     base = dict(
         license_key=None,
@@ -171,3 +183,64 @@ def test_setup_accepts_provider_keys_for_headless_installs(tmp_path, monkeypatch
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_setup_with_a_prepaid_licence_shows_credit_not_api_keys(tmp_path, monkeypatch) -> None:
+    """A prepaid key must come out of setup already cached as managed, so the
+    first `swap gui` shows the voucher box instead of the Decart/fal cards."""
+    from swap_cli import license
+
+    monkeypatch.setattr(config, "config_path", lambda: tmp_path / "config.toml")
+
+    async def _managed(*, force_online: bool = False) -> license.LicenseStatus:
+        assert force_online is True
+        config.update(license_mode="managed")  # what the real validate persists
+        return license.LicenseStatus(valid=True, reason="ok", mode="managed")
+
+    monkeypatch.setattr(license, "validate", _managed)
+    from typer.testing import CliRunner
+
+    from swap_cli.cli import app
+
+    result = CliRunner().invoke(app, ["setup", "--license", "SWAP-CLI-PREP"])
+    assert result.exit_code == 0, result.output
+    assert config.load().is_managed
+    assert "prepaid credit" in result.output
+    assert "No backend API key" not in result.output
+
+
+def test_setup_reports_a_rejected_licence(tmp_path, monkeypatch) -> None:
+    from swap_cli import license
+
+    monkeypatch.setattr(config, "config_path", lambda: tmp_path / "config.toml")
+
+    async def _bad(*, force_online: bool = False) -> license.LicenseStatus:
+        return license.LicenseStatus(valid=False, reason="license_not_found")
+
+    monkeypatch.setattr(license, "validate", _bad)
+    from typer.testing import CliRunner
+
+    from swap_cli.cli import app
+
+    result = CliRunner().invoke(app, ["setup", "--license", "SWAP-CLI-NOPE"])
+    assert result.exit_code == 0, result.output
+    assert "Licence check failed" in result.output
+
+
+def test_setup_still_saves_when_the_licence_server_is_unreachable(tmp_path, monkeypatch) -> None:
+    from swap_cli import license
+
+    monkeypatch.setattr(config, "config_path", lambda: tmp_path / "config.toml")
+
+    async def _offline(*, force_online: bool = False) -> license.LicenseStatus:
+        raise license.LicenseError("network down")
+
+    monkeypatch.setattr(license, "validate", _offline)
+    from typer.testing import CliRunner
+
+    from swap_cli.cli import app
+
+    result = CliRunner().invoke(app, ["setup", "--license", "SWAP-CLI-OFFL"])
+    assert result.exit_code == 0, result.output
+    assert config.load().license_key == "SWAP-CLI-OFFL"
+    assert "Couldn't reach the licence server" in result.output
