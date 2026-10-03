@@ -111,6 +111,60 @@ def test_build_watermark_remover_off_returns_none(monkeypatch) -> None:
     assert _build_watermark_remover(opts2) is None
 
 
+def test_build_watermark_remover_never_runs_on_fal() -> None:
+    """fal streams no badge — the remover could only paint over real pixels,
+    so it is never built for fal even with removal switched on."""
+    if "swap_cli.camera" not in sys.modules:
+        sys.modules["swap_cli.camera"] = types.ModuleType("swap_cli.camera")
+        sys.modules["swap_cli.camera"].CameraTrack = MagicMock()  # type: ignore[attr-defined]
+    from swap_cli.runtime import RunOptions, _build_watermark_remover
+
+    opts = RunOptions(
+        decart_api_key="", reference=None, prompt="p", provider=" FAL ",
+        remove_watermark=True, watermark_enabled=lambda: True,
+    )
+    assert _build_watermark_remover(opts) is None
+
+
+def _run_one_frame(disp, frame_bgr) -> None:
+    """Drive Display._loop for exactly one frame, then stop it."""
+    import asyncio
+
+    import numpy as np  # noqa: F401  (frame_bgr is an ndarray)
+
+    frame = MagicMock()
+    frame.to_ndarray.return_value = frame_bgr
+
+    async def _recv():
+        disp._stopped.set()
+        return frame
+
+    disp._track.recv = _recv
+    asyncio.run(disp._loop())
+
+
+def test_display_watermark_switch_applies_mid_session() -> None:
+    """The GUI switch is polled per frame: off → the remover is skipped."""
+    import numpy as np
+
+    from swap_cli.display import Display
+
+    remover = MagicMock(name="WatermarkRemover")
+    remover.process.side_effect = lambda bgr: bgr
+    state = {"on": False}
+    disp = Display(
+        track=MagicMock(), watermark=remover, show_window=False,
+        watermark_enabled=lambda: state["on"],
+    )
+    _run_one_frame(disp, np.zeros((4, 4, 3), np.uint8))
+    remover.process.assert_not_called()
+
+    state["on"] = True
+    disp._stopped.clear()
+    _run_one_frame(disp, np.zeros((4, 4, 3), np.uint8))
+    remover.process.assert_called_once()
+
+
 class _FakePath:
     """Path replacement for the win32 driver-detection tests.
 

@@ -270,12 +270,13 @@ class SwapGUI(ctk.CTk):
             variable=self._vcam_var,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
 
-        # Sprint 15: per-frame Decart watermark removal. Defaults ON — the
-        # app ships a bundled default template so removal works out of the
-        # box; clients get a clean feed without any capture step. The toggle
-        # is read when Live is clicked (start-time); flip it off here before
-        # going Live if you ever want the raw feed.
-        self._watermark_var = tk.BooleanVar(value=True)
+        # Sprint 15: per-frame Decart watermark removal, seeded from the saved
+        # preference (config defaults it ON — the bundled template works out of
+        # the box). It applies live: the stream polls _watermark_live each frame,
+        # a plain bool because a tk variable can't be read off the main thread.
+        _wm_saved = config.load().remove_watermark
+        self._watermark_var = tk.BooleanVar(value=True if _wm_saved is None else _wm_saved)
+        self._watermark_live = bool(self._watermark_var.get())
         ctk.CTkSwitch(
             opts,
             text="Remove watermark",
@@ -824,6 +825,7 @@ class SwapGUI(ctk.CTk):
     def _sync_watermark_options(self) -> None:
         """Show the removal-style picker only when watermark removal is on —
         there's nothing to configure when it's off."""
+        self._watermark_live = bool(self._watermark_var.get())
         row = getattr(self, "_watermark_removal_row", None)
         if row is None:
             return
@@ -958,6 +960,9 @@ class SwapGUI(ctk.CTk):
                 bool(self._watermark_var.get())
                 if hasattr(self, "_watermark_var")
                 else False
+            ),
+            watermark_enabled=(
+                (lambda: self._watermark_live) if hasattr(self, "_watermark_var") else None
             ),
             watermark_template=cfg.watermark_template,
             watermark_method=cfg.watermark_method,

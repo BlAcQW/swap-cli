@@ -368,7 +368,7 @@ def run(
     # watermark wins; when omitted (None) fall back to saved config. This
     # keeps --no-remove-watermark working even when config defaults it on.
     wm_enabled = (
-        remove_watermark if remove_watermark is not None else cfg.remove_watermark
+        remove_watermark if remove_watermark is not None else bool(cfg.remove_watermark)
     )
     wm_template = (
         str(watermark_template) if watermark_template else cfg.watermark_template

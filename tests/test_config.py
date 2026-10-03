@@ -115,7 +115,7 @@ def test_watermark_defaults_when_absent() -> None:
     """Old config files (no watermark keys) load with safe defaults."""
     config.save(config.Config("L1", "dct_x", None, None))
     cfg = config.load()
-    assert cfg.remove_watermark is False
+    assert cfg.remove_watermark is None  # never chosen
     assert cfg.watermark_template is None
     assert cfg.watermark_method == "template"
     assert cfg.watermark_removal == "reconstruct"
@@ -145,3 +145,12 @@ def test_escape_handles_quotes_and_backslashes() -> None:
     config.save(cfg)
     reloaded = config.load()
     assert reloaded.license_key == 'has "quotes" and \\backslashes'
+
+
+def test_watermark_off_is_saved_explicitly() -> None:
+    """Turning the GUI switch off must survive a restart (it used to be
+    dropped on save and come back ON)."""
+    config.save(config.Config("L1", None, None, None, remove_watermark=False))
+    assert config.load().remove_watermark is False
+    config.save(config.Config("L1", None, None, None, remove_watermark=True))
+    assert config.load().remove_watermark is True

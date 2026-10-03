@@ -40,6 +40,7 @@ class Display:
         virtual_camera: bool = False,
         vcam_backend: str = "obs",
         watermark: WatermarkRemover | None = None,
+        watermark_enabled: callable | None = None,  # type: ignore[valid-type]
         show_window: bool = True,
         on_first_frame: callable | None = None,  # type: ignore[valid-type]
     ) -> None:
@@ -67,6 +68,9 @@ class Display:
         # Injected as a configured instance so _loop stays thin and the
         # remover is unit-testable in isolation.
         self._watermark = watermark
+        # Polled each frame so the GUI switch applies mid-session. None = on
+        # whenever a remover was built.
+        self._watermark_enabled = watermark_enabled
         self._writer: cv2.VideoWriter | None = None
         # pyvirtualcam.Camera — lazy-init on first frame so we know the
         # actual width/height from Decart's stream rather than guessing.
@@ -112,6 +116,14 @@ class Display:
         """Most recent RAW (pre-removal) frame — for the W-key watermark capture."""
         return self._latest_raw_bgr
 
+    def _watermark_on(self) -> bool:
+        if self._watermark_enabled is None:
+            return True
+        try:
+            return bool(self._watermark_enabled())
+        except Exception:  # a broken hook must not kill the stream
+            return False
+
     async def _loop(self) -> None:
         if self._show_window:
             cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
@@ -129,7 +141,7 @@ class Display:
                 # Sprint 15: strip the Decart watermark before anything
                 # downstream sees the frame. process() never raises — it
                 # returns the frame unchanged on any failure.
-                if self._watermark is not None:
+                if self._watermark is not None and self._watermark_on():
                     bgr = self._watermark.process(bgr)
                 self._latest_bgr = bgr
                 self._maybe_init_writer(bgr.shape, fps_guess=20)

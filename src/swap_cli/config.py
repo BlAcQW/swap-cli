@@ -58,9 +58,10 @@ class Config:
     voice_fast: bool = False
     # Sprint 15: per-frame watermark removal. The Decart "AI Generated"
     # badge roams the frame, so removal runs template-match + inpaint on
-    # every frame. All optional — older config files load fine. Off by
-    # default so existing users aren't surprised by the latency cost.
-    remove_watermark: bool = False
+    # every frame. All optional — older config files load fine. None = never
+    # chosen: the CLI treats that as off (latency cost), the GUI as on; an
+    # explicit False is saved so turning the GUI switch off sticks.
+    remove_watermark: bool | None = None
     watermark_template: str | None = None  # path to captured watermark PNG
     watermark_method: str = "template"  # "template" | "threshold"
     # How a located badge is hidden: "reconstruct" (invisible rebuild) or
@@ -148,7 +149,9 @@ def load() -> Config:
         last_voice_output=_int_or_none(data.get("last_voice_output")),
         voice_engine=_clean(data.get("voice_engine")) or "rvc",
         voice_fast=bool(data.get("voice_fast", False)),
-        remove_watermark=bool(data.get("remove_watermark", False)),
+        remove_watermark=(
+            None if data.get("remove_watermark") is None else bool(data["remove_watermark"])
+        ),
         watermark_template=_clean(data.get("watermark_template")),
         watermark_method=_clean(data.get("watermark_method")) or "template",
         watermark_removal=_clean(data.get("watermark_removal")) or "reconstruct",
@@ -190,8 +193,8 @@ def save(cfg: Config) -> Path:
         body.append(f'voice_engine = "{_escape(cfg.voice_engine)}"')
     if cfg.voice_fast:
         body.append("voice_fast = true")
-    if cfg.remove_watermark:
-        body.append("remove_watermark = true")
+    if cfg.remove_watermark is not None:
+        body.append(f"remove_watermark = {'true' if cfg.remove_watermark else 'false'}")
     if cfg.watermark_template:
         body.append(f'watermark_template = "{_escape(cfg.watermark_template)}"')
     if cfg.watermark_method and cfg.watermark_method != "template":

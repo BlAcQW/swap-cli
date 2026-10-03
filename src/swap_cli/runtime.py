@@ -96,6 +96,10 @@ class RunOptions:
     watermark_template_width: int | None = None  # capture-frame width (scale center)
     # Sprint 17: independent color/shape safety net (on by default).
     watermark_signature_fallback: bool = True
+    # Live read of the GUI's "Remove watermark" switch, polled per frame, so
+    # flipping it mid-session takes effect at once. None = remove_watermark
+    # decides for the whole session (CLI).
+    watermark_enabled: Callable[[], bool] | None = None
     # Sprint 18: which realtime backend runs the swap. "decart" (default, WebRTC)
     # or "fal" (the same Lucy model resold by fal.ai, over a websocket). fal is a
     # separate Decart account, so its watermark policy may differ.
@@ -337,6 +341,7 @@ async def run_session(opts: RunOptions) -> None:
                 virtual_camera=opts.virtual_camera,
                 vcam_backend=opts.vcam_backend,
                 watermark=_build_watermark_remover(opts),
+                watermark_enabled=opts.watermark_enabled,
                 show_window=opts.show_preview_window,
                 on_display_ready=opts.on_display_ready,
                 on_first_frame=_on_first_frame,
@@ -449,7 +454,14 @@ def _build_watermark_remover(opts: RunOptions) -> Any:
     this module (consistent with the lazy decart/aiortc imports above).
     Never raises — a misconfigured remover degrades to no removal.
     """
-    if not opts.remove_watermark:
+    # fal streams no badge, so there is nothing to remove — and the remover's
+    # near-white search could only ever paint over real pixels (collars, skin
+    # highlights). Every prepaid session runs on fal.
+    if (opts.provider or "").strip().lower() == "fal":
+        if opts.remove_watermark:
+            print("[runtime] watermark removal skipped — fal streams no badge", flush=True)
+        return None
+    if not opts.remove_watermark and opts.watermark_enabled is None:
         return None
     try:
         from .watermark import (
@@ -515,6 +527,7 @@ def _on_remote_stream(
     virtual_camera: bool = False,
     vcam_backend: str = "obs",
     watermark: Any = None,
+    watermark_enabled: Callable[[], bool] | None = None,
     show_window: bool = True,
     on_display_ready: Callable[[Any], None] | None = None,
     on_first_frame: Callable[[], None] | None = None,
@@ -532,6 +545,7 @@ def _on_remote_stream(
         virtual_camera=virtual_camera,
         vcam_backend=vcam_backend,
         watermark=watermark,
+        watermark_enabled=watermark_enabled,
         show_window=show_window,
         on_first_frame=on_first_frame,
     )
